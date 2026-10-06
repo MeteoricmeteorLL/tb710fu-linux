@@ -95,7 +95,7 @@ pixel values appearing in our own pages while we watched — is written up in
 ## Repository layout / 仓库结构
 
 ```
-docs/                       (9 documents / 共 9 篇)
+docs/                       (10 documents / 共 10 篇)
   INSTALL-FROM-ZERO.md  stock tablet → Linux: a recovery shell, then back up
   INSTALL.md         install this rootfs, or another distro / 安装教程（两条路径）
   STATUS.md          what works, part by part / 各部位支持情况
@@ -105,6 +105,7 @@ docs/                       (9 documents / 共 9 篇)
   BUILD-KERNEL.md    rebuild the kernel / 重建内核
   BUILD-UBOOT.md     rebuild U-Boot / 重建 U-Boot
   RELEASE.md         publishing, checksums, licensing / 发布与授权
+  PITFALLS.md        the traps that cost us the most time / 花时间最多的那些坑
 kernel/
   patches/           TB710FU-full-tree.diff (49 files) + base commit / 补丁与基线
   sources/           new files the diff does not carry / diff 里没有的新增源码
@@ -141,6 +142,10 @@ LICENSE, .gitattributes
 * **See what actually works** — `docs/STATUS.md`. / 可用性看 `docs/STATUS.md`。
 * **Understand the rough edges** — `docs/KNOWN-ISSUES.md`. / 细节看
   `docs/KNOWN-ISSUES.md`。
+* **Avoid the traps we already hit** — `docs/PITFALLS.md`: EL1 entry, `.bss`,
+  memboot windows, the kernel-build trio, PDC-swallowed interrupts, the audio bus
+  format, the four stacked WiFi bugs, and the measurement habits that untangled
+  them. / 别重踩我们踩过的坑看 `docs/PITFALLS.md`。
 * **Rebuild anything** — `docs/BUILD-KERNEL.md`, `docs/BUILD-UBOOT.md`. /
   重建看这两篇。
 * **Publish/fork it** — `docs/RELEASE.md`. / 发布看 `docs/RELEASE.md`。

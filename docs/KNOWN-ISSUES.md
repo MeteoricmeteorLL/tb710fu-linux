@@ -291,25 +291,37 @@ What is wrong / 问题在哪里: the speaker output is harsh and crackling at ev
 volume, which is what a wrong TDM slot mapping or a wrong gain stage in the
 four-channel path sounds like.  The suspects, in the order worth checking:
 
-1. the AW882xx **TDM 4-channel** configuration — which of the four channels the
-   amps take, and their per-channel gain (`sound-channel` / `aw-re-*` in the
-   driver, and the DTS properties on the four `aw882xx@3x` nodes);
-2. the **ACF** parameter file being applied differently than the vendor ROM does;
+1. **the ACF parameter set still describes the vendor's bus.**  The amplifiers'
+   receiver is configured by the ACF for MSB-justified / 32-bit / 64 fs (matching
+   Android's TDM path), while the driver now forces Philips I2S / 16-bit / 32 fs
+   before every start — that register write is what got sound out at all, but the
+   ACF's own coefficients, gain blocks and DSP configuration were derived for the
+   other format.  This is the first thing to look at;
+2. **per-amplifier gain and channel mapping** — four amps fed from two channels
+   (`sound-channel` / `aw-re-*` in the driver, and the properties on the four
+   `aw882xx@3x` DTS nodes);
 3. the codec's own speaker gain stages.
 
-Nobody has measured the output yet — no `tinymix`/`amixer` sweep, no recording
-of the analogue output.  That measurement is the next step, not another guess.
+Nobody has measured the output yet: no `tinymix`/`amixer` sweep, no recording of
+the analogue output.  The amplifiers expose `reg` / `rw` sysfs nodes, so gain and
+I2SCTRL combinations can be swept **without rebuilding anything** — that is how
+the silent-amplifier bug was found (`docs/PITFALLS.md` §6).  Do that before
+theorising.
 
 扬声器在每个音量下都刺耳、爆音 —— 这正是"四声道通路里 TDM 槽位映射错了或增益级错了"
 听起来的样子。值得依次排查：
 
-1. AW882xx 的 **TDM 4 声道**配置 —— 功放取四个声道里的哪一个、各自的增益（驱动里的
-   `sound-channel` / `aw-re-*`，以及 DTS 上四个 `aw882xx@3x` 节点的属性）；
-2. **ACF** 参数的应用方式与厂商 ROM 不一致；
+1. **ACF 参数描述的仍是厂商的总线**：功放的接收机被 ACF 配成 MSB-justified / 32bit /
+   64fs（对齐 Android 的 TDM 路径），而驱动现在每次 start 前强制成 Philips I2S /
+   16bit / 32fs —— 那次寄存器写入是"终于出声"的原因，但 ACF 里的系数、增益块与 DSP 配置
+   是按另一套格式推出来的。这是第一个该看的地方；
+2. **逐颗功放的增益与声道映射** —— 四颗功放由两个声道驱动（驱动里的 `sound-channel` /
+   `aw-re-*`，以及 DTS 上四个 `aw882xx@3x` 节点的属性）；
 3. codec 自身的扬声器增益级。
 
-目前还没有人实测过输出 —— 没做过 `tinymix`/`amixer` 扫描，也没录过模拟输出。下一步是
-把这个量出来，而不是继续猜。
+目前还没有人实测过输出：没做过 `tinymix`/`amixer` 扫描，也没录过模拟输出。功放驱动暴露了
+`reg` / `rw` 两个 sysfs 节点，增益与 I2SCTRL 的组合可以**不重编任何东西**就扫完 —— 当
+"功放静音"那个 bug 就是这么找到的（见 `docs/PITFALLS.md` 第 6 节）。先做这件事，再谈推断。
 
 Not verified / 未验证: microphone capture, wired headphone output, and any
 Bluetooth sink other than headphones (PipeWire's user units are configured for a
