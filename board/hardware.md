@@ -42,7 +42,7 @@ WiFi 供电轨。面板/触摸的点亮工作与这台机器的固件集来自
 | firmware | `/lib/firmware/novatek/novatek_nt36532_fw.bin`, flashed by the driver at probe |
 | quirk | the panel's DSI reset makes the SPI probe fail (`-22`) on a cold boot; `tb-touch-rebind.service` re-binds `spi0.0` once the display pipeline is quiet |
 
-## Audio / 音频 (see `docs/KNOWN-ISSUES.md` §3 — no working playback path)
+## Audio / 音频 (see `docs/KNOWN-ISSUES.md` §3 — it plays, but the speakers are distorted)
 
 | | |
 |---|---|

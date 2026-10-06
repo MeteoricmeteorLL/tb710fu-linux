@@ -19,10 +19,11 @@ Legend / 图例: ✅ works · ⚠️ partial / 部分可用 · ❌ not working /
 | Touch / 触摸 | ✅ | Novatek NT36532 over SPI (`nvt_36xxx`, out of tree). The DSI reset makes the SPI probe fail on some cold boots — `tb-touch-rebind.service` re-binds it. / 冷启动偶发探测失败，已有重新 bind 服务 |
 | GPU / 图形 | ✅ | Adreno 750 (gen70900), `msm` built in. The IFPC quirk for this chip id is removed (see §4.1 of KNOWN-ISSUES) — without that the machine froze. `glxgears` measured **120 FPS** under XWayland. / 去掉 IFPC quirk 后才稳定；glxgears 实测 120 FPS |
 | Video codec / 视频编解码 | ✅ | Iris VPU firmware loads (`vpu33_4v.mbn`); 6/6 formats passed during bring-up. / VPU 固件可用，点亮阶段 6/6 格式通过 |
-| **Audio out (speaker / headphone) / 音频输出** | ❌ | The WCD939x codec, the four AW882xx amps and the ALSA topology all probe, the card enumerates — but there is **no working playback path**: `aplay` succeeds and nothing comes out. This is the biggest open gap. / 声卡能枚举、`aplay` 不报错，但**没有能出声的通路** —— 目前最大的缺口 |
-| Microphone / 麦克风 | ❌ | Same stack, same gap. / 同一套栈，同样不可用 |
-| Bluetooth audio / 蓝牙音频 | ❓ | PipeWire's user units are configured for a root session; not verified end to end. / 已为 root 会话配好 PipeWire，未端到端验证 |
-| WiFi | ⚠️ | WCN7850 / `ath12k` associates and gets a lease (`phy0` only appears ~110 s after a cold boot). Latency sawtooths 200–700 ms, rx bitrate 65–104 Mbps at −25 dBm, and RX needs host TX keepalive (`tb-wifi-kick`). On-demand by design. Details: KNOWN-ISSUES §2. / 能连能拿地址，但延迟抖动、速率低，且需要主机发送保活 |
+| **Speaker output / 扬声器输出** | ⚠️ | The path is **wired up end to end**: codec, four AW882xx amps and topology probe, the card enumerates and sound comes out. It is **badly distorted** — crackling/clipping at any volume — which points at the TDM 4-channel slot mapping or gain staging. Nobody has measured it yet; that is the next step (KNOWN-ISSUES §3). / 链路**已打通**（codec/功放/拓扑都探测成功、声卡枚举、能出声），但**声音很炸**（任意音量都爆音/削波），指向 TDM 4 声道的槽位映射或增益级；还没人实测过，这是下一步 |
+| Microphone / 麦克风 | ❓ | Untested. / 未验证 |
+| Headphones (wired) / 有线耳机 | ❓ | Untested; the amplifier path is shared with the speakers. / 未验证；与扬声器共用功放通路 |
+| **Bluetooth audio / 蓝牙音频** | ✅ | **Tested with headphones** (the only sink tried) — sound comes through. No other Bluetooth sink, and no profile beyond A2DP playback, has been exercised. / **用耳机测过**（目前唯一试过的输出设备），能出声；其它蓝牙输出与 A2DP 之外的模式未验证 |
+| **WiFi** | ⚠️ **+ crash hazard** | WCN7850 / `ath12k` associates and gets a lease (`phy0` only appears ~110 s after a cold boot), but latency sawtooths 200–700 ms, rx bitrate stays at 65–104 Mbps at −25 dBm, and RX needs a host TX keepalive (`tb-wifi-kick`). **It has also hung/reset this board and still prints `NOHZ tick-stop error` softirq warnings**, which is why it is loaded on demand rather than at boot. Details and what to capture before you poke it: KNOWN-ISSUES §2. / 能连能拿地址但延迟抖动、速率低、需要保活；**而且它把本机搞死过、现在仍会打软中断告警**，所以是按需加载 |
 | Bluetooth | ⚠️ | Transport up: `hci_uart` on `uart14` (the `uart14fix` U-Boot lineage), firmware loads. Pairing/audio untested. / 传输层可用（uart14 需保留），配对与音频未验证 |
 | USB device (NCM) | ✅ | The gadget carries the rescue console: board `192.168.7.2`, host `192.168.7.1`, `ssh`, `nc 4444`, `telnet 4445`. This is the lifeline when there is no display. / 救援控制台走这条链路，没有显示时它是唯一入口 |
 | USB host / OTG | ⚠️ | An OTG keyboard was used during bring-up. Host mode from the running desktop is not verified. / 点亮阶段用过 OTG 键盘，桌面下的 host 模式未验证 |
@@ -51,11 +52,12 @@ Legend / 图例: ✅ works · ⚠️ partial / 部分可用 · ❌ not working /
 A usable Linux tablet: it boots, the screen and touch work, the GPU is stable,
 USB and storage are solid, and you can install anything whose packages do not
 need user namespaces.  It is **not** yet a daily driver for media: **the speakers
-are silent**, WiFi is slow, and suspend/sensors/camera have not been touched —
+play, but the sound is badly distorted**, WiFi is slow, and
+suspend/sensors/camera have not been touched —
 and there is one memory-corruption bug that used to bite large file writes, which
 this repository fixes (see `docs/KNOWN-ISSUES.md` §1).
 
 一台能用的 Linux 平板：能启动、屏幕与触摸可用、GPU 稳定、USB 与存储可靠，可以装任何
-不依赖用户命名空间的软件。但**还不能当影音日常机**：**扬声器没有声音**、WiFi 慢，
+不依赖用户命名空间的软件。但**还不能当影音日常机**：**扬声器能出声但声音很炸**、WiFi 慢，
 suspend/传感器/相机完全没做 —— 另外那个会让大文件写入静默损坏的内存 bug，本仓库已经
 修掉了（见 `docs/KNOWN-ISSUES.md` 第 1 节）。

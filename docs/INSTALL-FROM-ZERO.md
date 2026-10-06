@@ -153,7 +153,9 @@ adb pull /sdcard/stock ./stock-backup
   **无法把引导程序重新锁回去** —— 解锁在这类平台上是不可逆的；"恢复原厂"只能理解为
   "在已解锁设备上刷回原厂镜像"，解锁标记会一直保留。
 * **Read `docs/KNOWN-ISSUES.md` before you commit your only tablet to this.**  The
-  port works, but the speakers are silent, WiFi is slow, and suspend has never
-  been tried.  `docs/STATUS.md` has the per-subsystem picture.
+  port works, but the speaker sound is distorted, WiFi is slow (and can take the
+  machine down), and suspend has never been tried.  `docs/STATUS.md` has the
+  per-subsystem picture.
   **如果这是你唯一的平板，动手前先读 `docs/KNOWN-ISSUES.md`。** 移植可用，但扬声器
-  无声、WiFi 慢、suspend 从未试过。各部位情况见 `docs/STATUS.md`。
+  声音很炸、WiFi 慢（且可能把机器搞死）、suspend 从未试过。各部位情况见
+  `docs/STATUS.md`。

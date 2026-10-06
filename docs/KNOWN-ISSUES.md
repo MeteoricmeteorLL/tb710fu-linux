@@ -189,7 +189,25 @@ what `scripts/make-release-rootfs.sh` does, and why it retries.
 
 ---
 
-## 2. WiFi (ath12k / WCN7850): works, but slow and fragile / WiFi 能用但慢且脆弱
+## 2. WiFi (ath12k / WCN7850): slow, fragile, and a crash hazard / WiFi 慢、脆弱、且有把机器搞死的风险
+
+> ⚠️ **This driver has taken this machine down, and it still can.**  `ath12k`
+> probing has hung or reset this board with no log at all, and under the current
+> patches it still prints `NOHZ tick-stop error: local softirq work is pending`
+> — a softirq stuck in its RX/poll path.  Treat "start WiFi" as "accept a chance
+> of losing the machine", which is why this image loads it **on demand**
+> (`wifi-on`, `systemctl start tb-wifi.service`) instead of at boot.  If you make
+> it automatic, you are choosing that risk on every boot.  Useful state before
+> you poke it: `/sys/fs/pstore` (ramoops survives a reset) and a photo of the
+> panel, which carries the boot ladder and the black box lines.
+>
+> ⚠️ **这一路驱动把本机搞死过，而且现在仍有可能。** `ath12k` 探测曾让本板卡死或
+> 重启、连日志都没留下；在当前补丁下它还会打 `NOHZ tick-stop error: local softirq
+> work is pending`（软中断卡在 RX/轮询路径里）。所以请把"开 WiFi"理解成"接受一次搞
+> 死机器的概率"—— 镜像里因此是**按需**加载（`wifi-on` / `systemctl start
+> tb-wifi.service`）而不是开机自动；若改成自动，等于每次开机都承担这个风险。动手前
+> 有用的现场：`/sys/fs/pstore`（ramoops 能跨复位保留）和面板的照片（上面有启动梯子
+> 与黑匣子输出）。
 
 **Status: association and DHCP work; latency and throughput are poor.**
 **状态：能关联、能拿到 IP；延迟和吞吐都不理想。**
@@ -243,28 +261,62 @@ your network in `/etc/tb-wifi-credentials.conf` first.
 
 ---
 
-## 3. Speakers: no working audio path / 扬声器：音频通路不可用
+## 3. Audio: the path works, the speaker sound is distorted / 音频：链路已通，但扬声器声音很炸
 
-**Status: unavailable. 状态：不可用。**
+**Status: audio plays; the speaker output is badly distorted (crackling /
+clipping) at any volume.  The remaining problem is quality, not plumbing.**
+**状态：能出声；但扬声器在任何音量下都严重失真（爆音/削波）。剩下的是音质问题，
+不是链路问题。**
 
-What is in place / 已经就位: the ADSP/CDSP firmware loads, the WCD939x codec and
-the four AW882xx smart amplifiers probe (`aw882xx_acf.bin` is byte-identical to
-the vendor's), the ALSA topology `Lenovo-TB710FU-tplg.bin` is loaded, and the
-SoundWire/TDM plumbing (`snd-soc-sc8280xp`, `q6apm`/`q6afe`/`q6asm`) is built
-and enabled.
+What works / 已经跑通的:
 
-What is missing / 缺的是: a working playback path end-to-end.  The card
-enumerates, but routing audio through the LPASS macros into the AW882xx amps
-does not produce sound, and the TDM 4-channel experiments that were tried did
-not fix it.  Expect `aplay -l` to list a card and still hear nothing.
+* the ADSP/CDSP firmware loads, the WCD939x codec and the four AW882xx amplifiers
+  probe (`aw882xx_acf.bin` is byte-identical to the vendor's), the ALSA topology
+  `Lenovo-TB710FU-tplg.bin` is loaded, and the SoundWire/LPASS plumbing
+  (`snd-soc-sc8280xp`, `q6apm`/`q6afe`/`q6asm`) is built and enabled;
+* the card enumerates, `aplay` plays, and **sound does come out of the
+  speakers** — the routing through the LPASS macros into the AW882xx amps is
+  wired up;
+* **Bluetooth headphones work** — they are the only audio sink that has been
+  tested over Bluetooth.
 
-端到端能出声的通路还没有：声卡能枚举，但把音频经 LPASS 宏送到 AW882xx 功放不出声，
-试过的 TDM 4 声道方案也没解决。所以 `aplay -l` 能看到声卡但仍然听不到声音。
+* ADSP/CDSP 固件加载、WCD939x codec 与 4 颗 AW882xx 功放探测成功（`aw882xx_acf.bin`
+  与厂商逐字节相同）、ALSA 拓扑 `Lenovo-TB710FU-tplg.bin` 已加载、SoundWire/LPASS
+  那一套（`snd-soc-sc8280xp`、`q6apm`/`q6afe`/`q6asm`）已编译并启用；
+* 声卡能枚举、`aplay` 能放，**扬声器确实出声** —— 经 LPASS 宏到 AW882xx 功放的通路
+  已经接上了；
+* **蓝牙耳机可用** —— 蓝牙侧目前只测过耳机这一个输出设备。
 
-Bluetooth *audio* is a separate path and is further along, but is also not
-verified end to end in this image (PipeWire's user services are configured to
-run as root — see `docs/ROOTFS.md`).
-蓝牙音频是另一条通路，走得更远一些，但在这个镜像里也没有端到端验证。
+What is wrong / 问题在哪里: the speaker output is harsh and crackling at every
+volume, which is what a wrong TDM slot mapping or a wrong gain stage in the
+four-channel path sounds like.  The suspects, in the order worth checking:
+
+1. the AW882xx **TDM 4-channel** configuration — which of the four channels the
+   amps take, and their per-channel gain (`sound-channel` / `aw-re-*` in the
+   driver, and the DTS properties on the four `aw882xx@3x` nodes);
+2. the **ACF** parameter file being applied differently than the vendor ROM does;
+3. the codec's own speaker gain stages.
+
+Nobody has measured the output yet — no `tinymix`/`amixer` sweep, no recording
+of the analogue output.  That measurement is the next step, not another guess.
+
+扬声器在每个音量下都刺耳、爆音 —— 这正是"四声道通路里 TDM 槽位映射错了或增益级错了"
+听起来的样子。值得依次排查：
+
+1. AW882xx 的 **TDM 4 声道**配置 —— 功放取四个声道里的哪一个、各自的增益（驱动里的
+   `sound-channel` / `aw-re-*`，以及 DTS 上四个 `aw882xx@3x` 节点的属性）；
+2. **ACF** 参数的应用方式与厂商 ROM 不一致；
+3. codec 自身的扬声器增益级。
+
+目前还没有人实测过输出 —— 没做过 `tinymix`/`amixer` 扫描，也没录过模拟输出。下一步是
+把这个量出来，而不是继续猜。
+
+Not verified / 未验证: microphone capture, wired headphone output, and any
+Bluetooth sink other than headphones (PipeWire's user units are configured for a
+root session — see `docs/ROOTFS.md`).
+
+未验证：麦克风录音、有线耳机输出，以及蓝牙侧除耳机外的输出设备（PipeWire 的用户单元
+已为 root 会话配好，见 `docs/ROOTFS.md`）。
 
 ---
 

@@ -186,9 +186,11 @@ Not verified / 未验证:
 
 * `boot_b-linboot-v3-fbreg.img` **compiles and packs** but has not been flashed
   here — the shipped DTB already neutralises that bug, so flashing it is optional;
-* the audio path (speakers) has no verified working configuration — see
-  `KNOWN-ISSUES.md` §3;
-* WiFi throughput/latency, Bluetooth audio end to end, and the cause of the
-  remaining random reboots (`KNOWN-ISSUES.md` §4.5) are all still open;
+* the speaker output is distorted and nobody has measured it yet, the
+  microphone and wired headphones are untried, and Bluetooth audio has only been
+  tested with headphones — see `KNOWN-ISSUES.md` §3;
+* WiFi throughput/latency, the WiFi crash hazard (`KNOWN-ISSUES.md` §2), and the
+  cause of the remaining random reboots (`KNOWN-ISSUES.md` §4.5) are all still
+  open;
 * nothing about Android beyond "it boots from `boot_a` and reformats
   `userdata` on its first boot".

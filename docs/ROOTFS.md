@@ -109,6 +109,6 @@ cat /proc/device-tree/model               # Lenovo Xiaoxin Pad Pro GT (TB710FU)
 ls /dev/dri/card0 && cat /sys/class/drm/card0-*/status    # "connected"
 lsmod | grep -c nvt_36xxx                 # touch driver loaded
 dmesg | grep -i 'reserved mem.*framebuffer'   # the fix from KNOWN-ISSUES §1 is in
-aplay -l                                   # a card should exist (no sound yet, §3)
+aplay -l && speaker-test -c2 -t sine -l1   # sound should come out, distorted (see KNOWN-ISSUES §3)
 ip -br link | grep wlp1s0                  # WiFi device present after ~110 s
 ```

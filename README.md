@@ -15,12 +15,13 @@ partitions next to it.
 刷入的根文件系统镜像。安卓仍可从另一个槽启动，Linux 有自己的独立分区。
 
 > **Read `docs/KNOWN-ISSUES.md` first.**  The port works, but it is a work in
-> progress: WiFi is slow, the speakers are silent, and there is one serious
+> progress: WiFi is slow (and can crash the machine), the speakers play but
+> sound badly distorted, and there is one serious
 > memory-corruption bug whose root cause was found and whose fix is included
 > here.  Everything is documented with the evidence that established it.
 >
-> **请先读 `docs/KNOWN-ISSUES.md`。** 移植可用但仍是进行中的工作：WiFi 慢、扬声器
-> 无声，还有一个严重的内存损坏问题 —— 根因已找到，修复也在这个仓库里。每条都附了
+> **请先读 `docs/KNOWN-ISSUES.md`。** 移植可用但仍是进行中的工作：WiFi 慢（且可能把
+> 机器搞死）、扬声器能出声但声音很炸，还有一个严重的内存损坏问题 —— 根因已找到，修复也在这个仓库里。每条都附了
 > 得出结论的实测依据。
 
 **Published / 已发布**: this repository ·
@@ -34,19 +35,22 @@ commit `2c9e8827`, release [`fbreg-20261006`](https://github.com/MeteoricmeteorL
 ## What works / 可用状态
 
 A working Linux tablet, with a few loud gaps: it boots, the panel and touch work,
-the GPU is stable, USB and storage are solid — but **the speakers are silent**,
-WiFi is slow, and suspend/sensors/camera have not been touched.
+the GPU is stable, USB and storage are solid — but WiFi is slow and can take the
+machine down, **the speakers play with badly distorted sound**, and
+suspend/sensors/camera have not been touched.
 
 一台能用的 Linux 平板，但也有几个明显的缺口：能启动、屏幕与触摸可用、GPU 稳定、
-USB 与存储可靠 —— 但**扬声器没有声音**、WiFi 慢，suspend/传感器/相机完全没做。
+USB 与存储可靠 —— 但 WiFi 慢且可能把机器搞死、**扬声器能出声但声音很炸**，
+suspend/传感器/相机完全没做。
 
 | | Status / 状态 |
 |---|---|
 | Boot chain, kernel, panel, touch, GPU, video codec, USB-NCM rescue link, storage | **works** / 可用 |
 | Plasma 6 Wayland desktop, Chinese UI, root auto-login, virtual keyboard, Chromium/VLC | **works** / 可用 |
 | WiFi (WCN7850 / ath12k) | **partial** — associates and DHCPs, poor latency/throughput / 能连能拿地址，延迟吞吐差 |
-| Speakers, microphone | **not working** — no working playback path yet / 通路尚未打通 |
-| Bluetooth | transport up, pairing/audio not verified / 传输层起来了，未端到端验证 |
+| Speaker output | **works, badly distorted** — crackling/clipping at any volume / 能出声但很炸（严重失真） |
+| Microphone | **untested** / 未验证 |
+| Bluetooth | transport up; **audio tested with headphones only** / 传输层可用；音频只测过耳机 |
 | Sensors, camera | **not started** / 未做 · **suspend** untested / 未验证 |
 | `snap` / `flatpak` | **impossible** — `CLONE_NEWUSER` returns `EPERM` / 不可能 |
 | Stability | the memory-corruption crash is fixed; random reboots still open / 内存损坏已修，随机重启仍未定位 |
