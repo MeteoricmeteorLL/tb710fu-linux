@@ -1,0 +1,12 @@
+05744e9a4fc849bcd3ba1a12bef0fd451a3b1333c4e310eec494acde86778762 *release/linboot-20261006.img
+c8465961ca0a0e6599f438ad372c8ce4614d78d0348ea8cff4d7a44466e15cb0 *uboot/boot_b-linboot-v3.img
+515e24c567ef937ce8c543189e008191869ddcb24f5079bd3c2b083493ddd642 *uboot/boot_b-linboot-v3-fbreg.img
+1847389c01cde501d85bf855a23cdaea7b5f79a29cbea9d00cd5b1f1cae858ce *kernel/Image.gz
+f9d3d6d48ba412330b7cfb2951303457a8b8aef69d4a94c719baea69e314077c *kernel/dtb/dtb-20261006-fb-reserve.bin
+14e1ac68d780f37d464a06f1c794852a0a3d9b1296587e744dde2a55e982f5bc *kernel/dtb/dtb-before-fix.bin
+5ca72394b4b0efa3cd028a0a53fe4078f7ca32dd5fc51750dcfbc7a15e4d19ce *uboot/u-boot-13r-src-20261006-fbreg.tar.gz
+0d366cbf6b0abb87d1fff0ea50d274aa91f43324e8a9db6ab9e843a79848a4f7 *board/board-root.tgz
+b01f91de0544dac9389f35390e6ac0e8afbc84b35c0997c4ad2b4243643bb6c8 *firmware/tb710fu-firmware-20261005.tar.gz
+ac5c0dbc97981568b84140e95f3bd9f71ae18c1df4727c7c05412d460b7e9b79 *firmware/MD5SUMS
+2f369ff2807f37dd8b04d7f551003d195a354843718717f865542201c00abfae *kernel/patches/TB710FU-full-tree.diff
+# a1325d30e5b3f70c070895efc7f543d3656bbd5b594894c06f36c0612355d442  tb710fu-rootfs-20261006.tar.zst  (GitHub release asset, not in git)

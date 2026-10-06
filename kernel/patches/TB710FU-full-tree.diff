@@ -1,0 +1,4803 @@
+diff --git a/Documentation/devicetree/bindings/leds/backlight/silergy,sy7758.yaml b/Documentation/devicetree/bindings/leds/backlight/silergy,sy7758.yaml
+index 64af6b346..e03cacf42 100644
+--- a/Documentation/devicetree/bindings/leds/backlight/silergy,sy7758.yaml
++++ b/Documentation/devicetree/bindings/leds/backlight/silergy,sy7758.yaml
+@@ -28,6 +28,14 @@ properties:
+   enable-gpios:
+     maxItems: 1
+ 
++  silergy,follower:
++    description:
++      The chip does not own a backlight device of its own.  It only mirrors
++      the brightness programmed on the primary (non-follower) SY7758 of the
++      same panel, so that a backlight split across two chips stays uniform.
++      Boards using this do not need a second backlight device.
++    type: boolean
++
+ required:
+   - compatible
+   - reg
+diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
+index 1c86e7e98..cc764d456 100644
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -395,7 +395,7 @@ dtb-$(CONFIG_ARCH_QCOM)	+= sm8550-qrd.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8550-samsung-q5q.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8550-sony-xperia-yodo-pdx234.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8650-ayaneo-pocket-s2.dtb
+-
++dtb-$(CONFIG_ARCH_QCOM)	+= sm8650-lenovo-tb710fu.dtb
+ sm8650-hdk-display-card-dtbs	:= sm8650-hdk.dtb sm8650-hdk-display-card.dtbo
+ sm8650-hdk-display-card-rear-camera-card-dtbs	:= sm8650-hdk.dtb sm8650-hdk-display-card.dtbo sm8650-hdk-rear-camera-card.dtbo
+ sm8650-hdk-rear-camera-card-dtbs	:= sm8650-hdk.dtb sm8650-hdk-rear-camera-card.dtbo
+diff --git a/arch/arm64/kernel/pi/map_kernel.c b/arch/arm64/kernel/pi/map_kernel.c
+index fb44cbdd2..bfeea0304 100644
+--- a/arch/arm64/kernel/pi/map_kernel.c
++++ b/arch/arm64/kernel/pi/map_kernel.c
+@@ -197,9 +197,16 @@ static void __init remap_idmap_for_lpa2(void)
+ 	memset(init_pg_dir, 0, (char *)init_pg_end - (char *)init_pg_dir);
+ }
+ 
++/* TB710FU: the panel ABL leaves scanning out. This board has no UART, and no
++ * DRAM content survives a reset to be read back, so the framebuffer is the
++ * only channel a running kernel has. */
++#define TB_FB_PA		0xd5100000UL
++#define TB_FB_WINDOW		0x2000000UL
++
+ static void *__init map_fdt(phys_addr_t fdt)
+ {
+-	static u8 ptes[INIT_IDMAP_FDT_SIZE] __initdata __aligned(PAGE_SIZE);
++	static u8 ptes[INIT_IDMAP_FDT_SIZE + 2 * PAGE_SIZE]
++			 __initdata __aligned(PAGE_SIZE);
+ 	phys_addr_t efdt = fdt + MAX_FDT_SIZE;
+ 	phys_addr_t ptep = (phys_addr_t)ptes; /* We're idmapped when called */
+ 
+@@ -210,6 +217,19 @@ static void *__init map_fdt(phys_addr_t fdt)
+ 	map_range(&ptep, fdt, (u64)_text > fdt ? min((u64)_text, efdt) : efdt,
+ 		  fdt, PAGE_KERNEL, IDMAP_ROOT_LEVEL,
+ 		  (pte_t *)init_idmap_pg_dir, false, 0);
++
++	/*
++	 * TB710FU: map the panel as well. The identity map covers only the
++	 * kernel image by default, so without this a store to 0xD5100000 from
++	 * running kernel code takes a translation fault - which is what killed
++	 * the boot ladder that init/main.c has been carrying.
++	 *
++	 * Normal-NonCacheable: a cacheable mapping leaves the writes in the
++	 * cache, where the display pipeline cannot see them.
++	 */
++	map_range(&ptep, TB_FB_PA, TB_FB_PA + TB_FB_WINDOW, TB_FB_PA,
++		  __pgprot(PROT_DEVICE_nGnRnE), IDMAP_ROOT_LEVEL,
++		  (pte_t *)init_idmap_pg_dir, false, 0);
+ 	dsb(ishst);
+ 
+ 	return (void *)fdt;
+diff --git a/arch/arm64/kernel/setup.c b/arch/arm64/kernel/setup.c
+index 29c6100f0..a03ac7c9a 100644
+--- a/arch/arm64/kernel/setup.c
++++ b/arch/arm64/kernel/setup.c
+@@ -278,6 +278,64 @@ u64 cpu_logical_map(unsigned int cpu)
+ 	return __cpu_logical_map[cpu];
+ }
+ 
++/* TB710FU: the boot ladder is in init/main.c; see tb_mark(). */
++/* TB710FU: read /memory out of the flat tree and put it on the panel. */
++extern void tb_mem_bar(u64 base, u64 bytes, unsigned int banks);
++
++static int __init tb_mem_scan(unsigned long node, const char *uname,
++			      int depth, void *data)
++{
++	static int cells;
++	u64 *acc = data;
++	const __be32 *prop;
++	int len, i, ac, sc;
++
++	if (depth == 0) {
++		prop = of_get_flat_dt_prop(node, "#address-cells", &len);
++		ac = prop ? be32_to_cpup(prop) : 2;
++		prop = of_get_flat_dt_prop(node, "#size-cells", &len);
++		sc = prop ? be32_to_cpup(prop) : 2;
++		cells = (ac << 4) | sc;
++		return 0;
++	}
++
++	prop = of_get_flat_dt_prop(node, "device_type", &len);
++	if (!prop || len < 8 || strncmp((const char *)prop, "memory", 6))
++		return 0;
++
++	prop = of_get_flat_dt_prop(node, "reg", &len);
++	if (!prop || !len)
++		return 0;
++
++	ac = (cells >> 4) & 0xf;
++	sc = cells & 0xf;
++	for (i = 0; i + ac + sc <= len / 4; i += ac + sc) {
++		u64 size = 0;
++		int k;
++
++		for (k = 0; k < sc; k++)
++			size = (size << 32) | be32_to_cpup(prop + i + ac + k);
++		acc[0]++;
++		acc[1] += size;
++	}
++
++	return 0;
++}
++
++static void __init tb_mem_show(void)
++{
++	u64 acc[2] = { 0, 0 };
++
++	of_scan_flat_dt(tb_mem_scan, acc);
++	pr_info("TB MEMORY: %llu banks, %llu MiB total\n", acc[0], acc[1] >> 20);
++	/* identity: this runs before paging_init() builds the linear map */
++	tb_mem_bar(0xd5100000UL, acc[1], (unsigned int)acc[0]);
++}
++
++extern void tb_mark(u64 base, u32 code);
++#define TB_FB_IDENT	0xd5100000UL	/* while TTBR0 still holds the idmap */
++#define TB_FB_LINEAR	((u64)__va(0xd5100000UL))	/* once paging_init() has run */
++
+ void __init __no_sanitize_address setup_arch(char **cmdline_p)
+ {
+ 	setup_initial_init_mm(_text, _etext, _edata, _end);
+@@ -288,8 +346,11 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
+ 
+ 	early_fixmap_init();
+ 	early_ioremap_init();
++	tb_mark(TB_FB_IDENT, 0x1010);
+ 
+ 	setup_machine_fdt(__fdt_pointer);
++	tb_mark(TB_FB_IDENT, 0x1011);	/* the device tree scanned */
++	tb_mem_show();			/* and put what /memory says on the panel */
+ 
+ 	/*
+ 	 * Initialise the static keys early as they may be enabled by the
+@@ -297,6 +358,7 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
+ 	 */
+ 	jump_label_init();
+ 	parse_early_param();
++	tb_mark(TB_FB_IDENT, 0x1012);	/* early params parsed */
+ 
+ 	dynamic_scs_init();
+ 
+@@ -317,10 +379,21 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
+ 	 * TTBR0 is only used for the identity mapping at this stage. Make it
+ 	 * point to zero page to avoid speculatively fetching new entries.
+ 	 */
+-	cpu_uninstall_idmap();
++	tb_mark(TB_FB_IDENT, 0x1013);	/* last rung before the idmap goes */
++	/*
++	 * TB710FU: KEEP the identity map. cpu_uninstall_idmap() points TTBR0 at
++	 * the zero page, and the panel's mapping lives in TTBR0 - so from here
++	 * until paging_init() builds the linear map there is no way to write to
++	 * the framebuffer at all, which is exactly the window this boot dies in.
++	 * Keeping it costs a speculative-fetch hazard that mainline accepted for
++	 * years.
++	 */
++	tb_mark(TB_FB_IDENT, 0x1020);
+ 
+ 	xen_early_init();
++	tb_mark(TB_FB_IDENT, 0x1021);
+ 	efi_init();
++	tb_mark(TB_FB_IDENT, 0x1022);
+ 
+ 	if (!efi_enabled(EFI_BOOT)) {
+ 		if ((u64)_text % MIN_KIMG_ALIGN)
+@@ -330,8 +403,11 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
+ 	}
+ 
+ 	arm64_memblock_init();
++	tb_mark(TB_FB_IDENT, 0x1023);
+ 
++	tb_mark(TB_FB_IDENT, 0x1024);
+ 	paging_init();
++	tb_mark(TB_FB_LINEAR, 0x1014);	/* linear map and memblock done */
+ 
+ 	acpi_table_upgrade();
+ 
+@@ -342,6 +418,7 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
+ 		unflatten_device_tree();
+ 
+ 	bootmem_init();
++	tb_mark(TB_FB_LINEAR, 0x1015);
+ 
+ 	kasan_init();
+ 
+diff --git a/arch/arm64/mm/mmu.c b/arch/arm64/mm/mmu.c
+index 79d90226f..fbceafe68 100644
+--- a/arch/arm64/mm/mmu.c
++++ b/arch/arm64/mm/mmu.c
+@@ -1471,14 +1471,22 @@ static void __init create_idmap(void)
+ 	}
+ }
+ 
++/* TB710FU: the boot ladder lives in init/main.c; see tb_mark() there. */
++extern void tb_mark(u64 base, u32 code);
++#define TB_FB_IDENT	0xd5100000UL
++
+ void __init paging_init(void)
+ {
++	tb_mark(TB_FB_IDENT, 0x1025);
+ 	map_mem();
++	tb_mark(TB_FB_IDENT, 0x1026);
+ 
+ 	memblock_allow_resize();
+ 
+ 	create_idmap();
++	tb_mark(TB_FB_IDENT, 0x1027);
+ 	declare_kernel_vmas();
++	tb_mark(TB_FB_IDENT, 0x1028);
+ }
+ 
+ #ifdef CONFIG_MEMORY_HOTPLUG
+diff --git a/drivers/bus/mhi/host/boot.c b/drivers/bus/mhi/host/boot.c
+index 19c84913c..087852765 100644
+--- a/drivers/bus/mhi/host/boot.c
++++ b/drivers/bus/mhi/host/boot.c
+@@ -593,8 +593,31 @@ void mhi_fw_load_handler(struct mhi_controller *mhi_cntrl)
+ 	/* Transitioning into MHI RESET->READY state */
+ 	ret = mhi_ready_state_transition(mhi_cntrl);
+ 	if (ret) {
+-		dev_err(dev, "MHI did not enter READY state\n");
+-		goto error_ready_state;
++		/*
++		 * TB710FU(acm32): WCN7850 在 PBL->SBL 交接时会复位自己的 PCIe
++		 * 链路, 设备从总线上消失一段时间, 然后带着 SBL EE 回来(实测:
++		 * 失败后 EE=SBL, MHI READY 在默认 90s 等待窗之后才置位)。
++		 * 默认流程在这里直接放弃, 永远走不到 BHIe AMSS 下载。
++		 * 这里把 READY 等待延长: 恢复 PM 状态并重试, 给链路重训和
++		 * SBL 重新初始化留足时间, 成功后照常走 BHIe。
++		 */
++		int retry;
++
++		for (retry = 0; retry < 4 && ret; retry++) {
++			msleep(3000);
++			dev_info(dev,
++				 "acm32: device lost during PBL->SBL handover, retrying READY wait (%d/4)\n",
++				 retry + 1);
++			write_lock_irq(&mhi_cntrl->pm_lock);
++			mhi_cntrl->pm_state = MHI_PM_POR;
++			mhi_cntrl->dev_state = MHI_STATE_RESET;
++			write_unlock_irq(&mhi_cntrl->pm_lock);
++			ret = mhi_ready_state_transition(mhi_cntrl);
++		}
++		if (ret) {
++			dev_err(dev, "MHI did not enter READY state\n");
++			goto error_ready_state;
++		}
+ 	}
+ 
+ 	dev_info(dev, "Wait for device to enter SBL or Mission mode\n");
+diff --git a/drivers/bus/mhi/host/pm.c b/drivers/bus/mhi/host/pm.c
+index ced83fbb1..c28a2a9fa 100644
+--- a/drivers/bus/mhi/host/pm.c
++++ b/drivers/bus/mhi/host/pm.c
+@@ -9,6 +9,7 @@
+ #include <linux/dma-direction.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/interrupt.h>
++#include <linux/kthread.h>
+ #include <linux/list.h>
+ #include <linux/mhi.h>
+ #include <linux/module.h>
+@@ -811,6 +812,38 @@ void mhi_pm_st_worker(struct work_struct *work)
+ 				mhi_cntrl->ee = mhi_get_exec_env(mhi_cntrl);
+ 			write_unlock_irq(&mhi_cntrl->pm_lock);
+ 			mhi_fw_load_handler(mhi_cntrl);
++			/*
++			 * acm33: BHI 下载成功后设备会复位 PCIe 链路, 期间的
++			 * linkdown 可能已经排队了一个 DISABLE(把流程整个杀掉)。
++			 * 固件此刻其实已经在 SBL 里跑了 —— 丢弃排队的 DISABLE,
++			 * 若设备带着 SBL EE 回来就排队 SBL transition 继续 BHIe。
++			 */
++			{
++				enum mhi_ee_type ee2 = MHI_EE_MAX;
++				struct state_transition *d_itr, *d_tmp;
++				int w;
++
++				for (w = 0; w < 10; w++) {
++					msleep(2000);
++					list_for_each_entry_safe(d_itr, d_tmp, &head, node) {
++						if (d_itr->state == DEV_ST_TRANSITION_DISABLE) {
++							list_del(&d_itr->node);
++							kfree(d_itr);
++							dev_info(&mhi_cntrl->mhi_dev->dev,
++								 "acm33: dropped stale DISABLE transition\n");
++						}
++					}
++					ee2 = mhi_get_exec_env(mhi_cntrl);
++					dev_info(&mhi_cntrl->mhi_dev->dev,
++						 "acm33: post-BHI device EE: %s\n",
++						 TO_MHI_EXEC_STR(ee2));
++					if (ee2 == MHI_EE_SBL || MHI_IN_MISSION_MODE(ee2))
++						break;
++				}
++				if (ee2 == MHI_EE_SBL)
++					mhi_queue_state_transition(mhi_cntrl,
++								   DEV_ST_TRANSITION_SBL);
++			}
+ 			break;
+ 		case DEV_ST_TRANSITION_SBL:
+ 			write_lock_irq(&mhi_cntrl->pm_lock);
+@@ -1293,21 +1326,117 @@ void mhi_power_down_keep_dev(struct mhi_controller *mhi_cntrl,
+ }
+ EXPORT_SYMBOL_GPL(mhi_power_down_keep_dev);
+ 
++/*
++ * acm37: MSI 旁路 —— 用内核线程轮询 event ring, 代替设备->主机 MSI。
++ * 调用的就是硬中断处理程序本体, 完全等价于"收到一次 MSI"。
++ */
++static struct task_struct *acm37_poll_task;
++
++static int acm37_poll_thread(void *data)
++{
++	struct mhi_controller *mhi_cntrl = data;
++	struct mhi_event *ev;
++	unsigned long n = 0;
++	int i;
++
++	while (!kthread_should_stop()) {
++		/* acm38: 错误态也继续跑(原本一见 ERROR 就退, 后面的
++		 * RDDM/恢复事件就没人送了), 只在真正 DISABLE 时退出。 */
++		if (mhi_cntrl->pm_state == MHI_PM_DISABLE)
++			break;
++		if (!mhi_cntrl->mhi_ctxt)
++			break;
++
++		ev = mhi_cntrl->mhi_event;
++		for (i = 0; i < mhi_cntrl->total_ev_rings; i++, ev++)
++			mhi_irq_handler(0, ev);
++
++		/* acm39: 控制器级状态机(SYS_ERR/RDDM 检测)也要喂 */
++		mhi_intvec_threaded_handler(0, mhi_cntrl);
++
++		if ((n % 300) == 0)
++			dev_info(&mhi_cntrl->mhi_dev->dev,
++				 "acm37: poll n=%lu pm=%s ee=%s dev_state=%d m0=%u\n",
++				 n, to_mhi_pm_state_str(mhi_cntrl->pm_state),
++				 TO_MHI_EXEC_STR(mhi_cntrl->ee),
++				 mhi_cntrl->dev_state, mhi_cntrl->M0);
++		n++;
++		msleep(100);
++	}
++
++	dev_info(&mhi_cntrl->mhi_dev->dev, "acm37: poll thread exit n=%lu\n", n);
++	acm37_poll_task = NULL;
++	return 0;
++}
++
+ int mhi_sync_power_up(struct mhi_controller *mhi_cntrl)
+ {
+ 	int ret = mhi_async_power_up(mhi_cntrl);
+-	u32 timeout_ms;
+ 
+ 	if (ret)
+ 		return ret;
+ 
+-	/* Some devices need more time to set ready during power up */
+-	timeout_ms = mhi_cntrl->ready_timeout_ms ?
+-		mhi_cntrl->ready_timeout_ms : mhi_cntrl->timeout_ms;
+-	wait_event_timeout(mhi_cntrl->state_event,
+-			   MHI_IN_MISSION_MODE(mhi_cntrl->ee) ||
+-			   MHI_PM_FATAL_ERROR(mhi_cntrl->pm_state),
+-			   msecs_to_jiffies(timeout_ms));
++	/*
++	 * acm35/37: 主机侧全程用轮询代替设备中断。
++	 * 先轮询设备侧 BHI_EXECENV 等 mission mode(acm35), 进 AMSS 后补排队
++	 * DEV_ST_TRANSITION_MISSION_MODE, 再起 acm37 的 event-ring 轮询线程
++	 * (代替 MSI, 让 MHI 能收到设备的 M0 state-change 事件与之后所有 QMI 完成)。
++	 * 用 msleep 轮询, 不用长的 wait_event_timeout, 以免触发 hung_task_panic。
++	 */
++	{
++		int i;
++
++		for (i = 0; i < 1200; i++) {
++			enum mhi_ee_type hw_ee;
++
++			if (MHI_IN_MISSION_MODE(mhi_cntrl->ee))
++				break;
++
++			write_lock_irq(&mhi_cntrl->pm_lock);
++			hw_ee = MHI_REG_ACCESS_VALID(mhi_cntrl->pm_state) ?
++				mhi_get_exec_env(mhi_cntrl) : mhi_cntrl->ee;
++			write_unlock_irq(&mhi_cntrl->pm_lock);
++
++			if (hw_ee != mhi_cntrl->ee) {
++				dev_info(&mhi_cntrl->mhi_dev->dev,
++					 "acm35: hw EE %s -> %s\n",
++					 TO_MHI_EXEC_STR(mhi_cntrl->ee),
++					 TO_MHI_EXEC_STR(hw_ee));
++				mhi_cntrl->ee = hw_ee;
++			}
++
++			if (MHI_IN_MISSION_MODE(mhi_cntrl->ee)) {
++				dev_info(&mhi_cntrl->mhi_dev->dev,
++					 "acm35: mission mode by poll at t=%ds\n", i);
++				mhi_queue_state_transition(mhi_cntrl,
++							   DEV_ST_TRANSITION_MISSION_MODE);
++
++				/* acm37: 起 MSI 旁路线程(常驻, 供之后 QMI/QRTR 用) */
++				if (!acm37_poll_task) {
++					acm37_poll_task =
++						kthread_run(acm37_poll_thread,
++							    mhi_cntrl, "mhi_evpoll");
++					if (IS_ERR(acm37_poll_task)) {
++						dev_err(&mhi_cntrl->mhi_dev->dev,
++							"acm37: kthread_run failed %ld\n",
++							PTR_ERR(acm37_poll_task));
++						acm37_poll_task = NULL;
++					} else {
++						dev_info(&mhi_cntrl->mhi_dev->dev,
++							 "acm37: event-ring poll thread started\n");
++					}
++				}
++				break;
++			}
++
++			if ((i % 15) == 0)
++				dev_info(&mhi_cntrl->mhi_dev->dev,
++					 "acm35: t=%ds ee=%s pm=%s\n", i,
++					 TO_MHI_EXEC_STR(mhi_cntrl->ee),
++					 to_mhi_pm_state_str(mhi_cntrl->pm_state));
++			msleep(1000);
++		}
++	}
+ 
+ 	ret = (MHI_IN_MISSION_MODE(mhi_cntrl->ee)) ? 0 : -ETIMEDOUT;
+ 	if (ret)
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_catalog.c b/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
+index 90a0c7ffb..3949cc555 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
+@@ -1623,15 +1623,13 @@ static const struct adreno_info a7xx_gpus[] = {
+ 		.inactive_period = DRM_MSM_INACTIVE_PERIOD,
+ 		.quirks = ADRENO_QUIRK_HAS_CACHED_COHERENT |
+ 			  ADRENO_QUIRK_HAS_HW_APRIV |
+-			  ADRENO_QUIRK_PREEMPTION |
+-			  ADRENO_QUIRK_IFPC,
++			  ADRENO_QUIRK_PREEMPTION,
+ 		.funcs = &a7xx_gpu_funcs,
+ 		.zapfw = "gen70900_zap.mbn",
+ 		.a6xx = &(const struct a6xx_info) {
+ 			.protect = &a730_protect,
+ 			.pwrup_reglist = &a7xx_pwrup_reglist,
+ 			.dyn_pwrup_reglist = &a7xx_dyn_pwrup_reglist,
+-			.ifpc_reglist = &a750_ifpc_reglist,
+ 			.gbif_cx = a640_gbif,
+ 			.gmu_chipid = 0x7090100,
+ 			.gmu_cgc_mode = 0x00020202,
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+index ba810f26e..d954d52ee 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+@@ -11,6 +11,7 @@
+ #include "dpu_trace.h"
+ #include "disp/msm_disp_snapshot.h"
+ #include "msm_dsc_helper.h"
++#include <drm/drm_fixed.h>
+ 
+ #include <drm/display/drm_dsc_helper.h>
+ #include <drm/drm_managed.h>
+@@ -130,12 +131,17 @@ static void drm_mode_to_intf_timing_params(
+ 	if (phys_enc->hw_intf->cap->type != INTF_DP && timing->compression_en) {
+ 		struct drm_dsc_config *dsc =
+ 		       dpu_encoder_get_dsc_config(phys_enc->parent);
+-		/*
+-		 * TODO: replace drm_dsc_get_bpp_int with logic to handle
+-		 * fractional part if there is fraction
+-		 */
+-		timing->width = timing->width * drm_dsc_get_bpp_int(dsc) /
+-				(dsc->bits_per_component * 3);
++		/* map220v 66b96f87: the compressed width must be rounded UP -
++		 * integer division floors it, leaving the INTF timing one
++		 * pixel short of what the DSC encoder emits per line
++		 * (1600 * 8 / 30 = 426.67 -> 427, not 426). */
++		s64 comp_ratio, width;
++
++		width = drm_fixp_from_fraction(timing->width, 1);
++		comp_ratio = drm_fixp_from_fraction(mult_frac(100, dsc->bits_per_component * 3,
++							      drm_dsc_get_bpp_int(dsc)), 100);
++		width = drm_fixp_div(width, comp_ratio);
++		timing->width = drm_fixp2int_ceil(width);
+ 		timing->xres = timing->width;
+ 		timing->dce_bytes_per_line = msm_dsc_get_bytes_per_line(dsc);
+ 	}
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 7e4e3718b..488a217bb 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -9,6 +9,7 @@
+ #include <linux/err.h>
+ #include <linux/interrupt.h>
+ #include <linux/mfd/syscon.h>
++#include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/of_graph.h>
+ #include <linux/of_irq.h>
+@@ -150,6 +151,11 @@ struct msm_dsi_host {
+ 	struct work_struct err_work;
+ 	struct workqueue_struct *workqueue;
+ 
++	/* TB710FU bring-up: periodic DSI state heartbeat */
++	struct delayed_work diag_work;
++	unsigned int diag_frames;
++	unsigned int diag_rounds;
++
+ 	/* DSI 6G TX buffer*/
+ 	struct drm_gem_object *tx_gem_obj;
+ 	struct drm_gpuvm *vm;
+@@ -1569,8 +1575,15 @@ static void dsi_err_worker(struct work_struct *work)
+ 	u32 status = msm_host->err_work_state;
+ 
+ 	pr_err_ratelimited("%s: status=%x\n", __func__, status);
++	/* TB710FU: the MDP FIFO underflow here is a transient boot-window
++	 * event (~15-31 s after handover, while the desktop spins up).  The
++	 * sw_reset visibly blinks the panel AND hard-kills the NT36532 touch
++	 * FW on the other half of the combo chip, so a burst of underflows
++	 * meant repeated touch dead windows.  A transient underflow costs at
++	 * most one torn frame - keep the link up and just log it. */
+ 	if (status & DSI_ERR_STATE_MDP_FIFO_UNDERFLOW)
+-		dsi_sw_reset(msm_host);
++		pr_info_ratelimited("%s: MDP FIFO underflow, sw_reset skipped (TB710FU)\n",
++				    __func__);
+ 
+ 	/* It is safe to clear here because error irq is disabled. */
+ 	msm_host->err_work_state = 0;
+@@ -1667,6 +1680,22 @@ static void dsi_error(struct msm_dsi_host *msm_host)
+ 	/* disable dsi error interrupt */
+ 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_ERROR, 0);
+ 
++	/* TB710FU bring-up: print the raw registers before the handlers below
++	 * clear them - err_work_state only says "a FIFO error and a timeout",
++	 * the register contents say which FIFO bit and which timeout. */
++	pr_err_ratelimited("TBDSI %s fifo=%#x timeout=%#x ack=%#x clk=%#x st0=%#x dln0=%#x lane=%#x vid=%#x acth=%#x tot=%#x\n",
++			   dev_name(&msm_host->pdev->dev),
++			   dsi_read(msm_host, REG_DSI_FIFO_STATUS),
++			   dsi_read(msm_host, REG_DSI_TIMEOUT_STATUS),
++			   dsi_read(msm_host, REG_DSI_ACK_ERR_STATUS),
++			   dsi_read(msm_host, REG_DSI_CLK_STATUS),
++			   dsi_read(msm_host, REG_DSI_STATUS0),
++			   dsi_read(msm_host, REG_DSI_DLN0_PHY_ERR),
++			   dsi_read(msm_host, REG_DSI_LANE_STATUS),
++			   dsi_read(msm_host, REG_DSI_VID_CFG0),
++			   dsi_read(msm_host, REG_DSI_ACTIVE_H),
++			   dsi_read(msm_host, REG_DSI_TOTAL));
++
+ 	dsi_clk_status(msm_host);
+ 	dsi_fifo_status(msm_host);
+ 	dsi_ack_err_status(msm_host);
+@@ -1677,6 +1706,271 @@ static void dsi_error(struct msm_dsi_host *msm_host)
+ 	queue_work(msm_host->workqueue, &msm_host->err_work);
+ }
+ 
++/*
++ * TB710FU bring-up: heartbeat so the DSI state is visible even when nothing
++ * errors out.  dsi_error() only prints on a reported fault, which says nothing
++ * when the link is silent but "clean".  frames counts DSI_IRQ_VIDEO_DONE, i.e.
++ * how many frames the video engine actually pushed in the last interval.
++ */
++#define TBDSI_DIAG_MS	10000
++
++/*
++ * TB710FU: the ABL register snapshot showed the vendor leaves these controller
++ * registers in a state our driver never produces - most notably CMD_MODE_EN
++ * set alongside VIDEO_MODE_EN, HS_TIMER_CTRL programmed with a 60000-cycle
++ * timeout, and CLKOUT_TIMING_CTRL left at zero.  The vendor splash streams
++ * perfectly in that state; with mainline's values nothing reaches the panel.
++ * Applied at host enable and re-applied from the heartbeat: the command
++ * transfer path saves/restores CTRL around every DCS write, which silently
++ * reverts anything we only set once.
++ */
++/*
++ * TB710FU: the periodic heartbeat below is bring-up instrumentation and prints
++ * at KERN_ERR, so it lands on the console and in the ring buffer every 10s per
++ * link.  It is off now that the panel streams reliably; turn it back on with
++ *   echo 1 > /sys/module/msm/parameters/tb_dsi_diag
++ * The register writes in tb710fu_ctrl_fixup() still run every round either way.
++ */
++static bool tb_dsi_diag;
++module_param(tb_dsi_diag, bool, 0644);
++MODULE_PARM_DESC(tb_dsi_diag, "TB710FU: print the periodic DSI heartbeat/controller diagnostics");
++
++static void tb710fu_ctrl_fixup(struct msm_dsi_host *msm_host)
++{
++	dsi_write(msm_host, REG_DSI_CTRL, 0x1f7);
++	dsi_write(msm_host, 0x03c, 0x06100009);
++	dsi_write(msm_host, REG_DSI_CMD_CFG1, 0x00013c2c);
++	dsi_write(msm_host, 0x080, 0x80000004);
++	dsi_write(msm_host, REG_DSI_HS_TIMER_CTRL, 0x0004ea60);
++	dsi_write(msm_host, REG_DSI_TIMEOUT_STATUS, 0x00000000);
++	dsi_write(msm_host, REG_DSI_CLKOUT_TIMING_CTRL, 0x00000000);
++	dsi_write(msm_host, 0x114, 0x00001c00);
++	dsi_write(msm_host, 0x1b4, 0x00110006);
++	dsi_write(msm_host, 0x1c8, 0x00000007);
++	dsi_write(msm_host, 0x32c, 0x33531000);
++	dsi_write(msm_host, 0x158, 0x00000000);
++}
++
++/*
++ * TB710FU: ABL brings the display up (the splash is visible until the kernel
++ * handover) and leaves the whole display subsystem powered across the boot -
++ * pd_ignore_unused / clk_ignore_unused keep the rails, GDSCs and gates on.
++ * Before our driver touches anything, snapshot the DSI controller + PLL + PHY
++ * and the DPU DSC blocks exactly as the bootloader left them.  That state is
++ * a known-good vendor configuration; the diff against ours is the answer we
++ * have been hunting for eight kernel versions.
++ */
++static void tb710fu_abl_reg_dump_tagged(const char *tag)
++{
++	static const struct { phys_addr_t base; unsigned int len; const char *name; } ranges[] = {
++		{ 0x0ae94000ULL, 0x2000, "dsi0-ctrl+pll+phy" },
++		{ 0x0ae96000ULL, 0x2000, "dsi1-ctrl+pll+phy" },
++	};
++	int i, off;
++
++	for (i = 0; i < ARRAY_SIZE(ranges); i++) {
++		void __iomem *b = ioremap(ranges[i].base, ranges[i].len);
++
++		pr_err("TBDUMP begin %s %s\n", tag, ranges[i].name);
++		if (!b) {
++			pr_err("TBDUMP %s: ioremap failed\n", ranges[i].name);
++			continue;
++		}
++		for (off = 0; off < ranges[i].len; off += 16) {
++			u32 w[4];
++			int j;
++
++			for (j = 0; j < 4; j++)
++				/* fault-tolerant read: holes or unpowered
++				 * islands inside a range must not abort */
++				copy_from_kernel_nofault(&w[j], b + off + 4 * j, 4);
++
++			if (w[0] | w[1] | w[2] | w[3])
++				pr_err("TBDUMP %s %s +%#05x %08x %08x %08x %08x\n",
++				       tag, ranges[i].name, off, w[0], w[1], w[2], w[3]);
++		}
++		iounmap(b);
++		pr_err("TBDUMP end %s %s\n", tag, ranges[i].name);
++	}
++	pr_err("TBDUMP done %s\n", tag);
++}
++
++static int __init tb710fu_abl_reg_dump(void)
++{
++	tb710fu_abl_reg_dump_tagged("ABL");
++	return 0;
++}
++early_initcall(tb710fu_abl_reg_dump);
++
++/*
++ * Runtime controller-only dump for the ABL-vs-ours diff.  The full range above
++ * also covers the PHY lane block (base + 0x1000 upward) and the PLL, and
++ * reading those while the PHY is live is what took the board down silently -
++ * the OURS dump at round 1 produced no log lines at all and the boot died
++ * before its first flash snapshot.  The DSI controller window (0x000..0x1ff) is
++ * the part the heartbeat already reads every 10s, so it is safe.
++ */
++static void tb710fu_ours_ctrl_dump(void)
++{
++	static const phys_addr_t bases[] = { 0x0ae94000ULL, 0x0ae96000ULL };
++	static const char *const names[] = { "dsi0-ctrl", "dsi1-ctrl" };
++	int i, off;
++
++	for (i = 0; i < ARRAY_SIZE(bases); i++) {
++		void __iomem *b = ioremap(bases[i], 0x200);
++
++		if (!b) {
++			pr_err("TBDUMP ours: ioremap failed for %s\n", names[i]);
++			continue;
++		}
++		for (off = 0; off < 0x200; off += 16) {
++			u32 w[4];
++			int j;
++
++			for (j = 0; j < 4; j++)
++				copy_from_kernel_nofault(&w[j], b + off + 4 * j, 4);
++			pr_err("TBDUMP OURSC %s +%#05x %08x %08x %08x %08x\n",
++			       names[i], off, w[0], w[1], w[2], w[3]);
++		}
++		iounmap(b);
++		pr_err("TBDUMP end OURSC %s\n", names[i]);
++	}
++	pr_err("TBDUMP done OURSC\n");
++}
++
++/*
++ * TB710FU: the DPU-side capture (DSC encoder blocks + INTF0/INTF1) that used
++ * to live here is gone for good.  Reading 0xae81000 (dpu-dsc) while the
++ * pipeline streams delivers an asynchronous SError and a silent hard reset
++ * ~30s later - with no panic, no oops and nothing in pstore, which is exactly
++ * the 495s reset this board kept hitting (the round-40/45 dumps landed at
++ * ~410s/~460s).  It was bring-up instrumentation; the ABL-vs-ours diff it was
++ * chasing has long been captured.
++ */
++
++static ssize_t dsi_host_transfer(struct mipi_dsi_host *host,
++				 const struct mipi_dsi_msg *msg);
++
++/*
++ * TB710FU: the two "poke the panel while it is streaming" helpers that used to
++ * live here - a DCS GET_POWER_MODE read and a bare EXIT_SLEEP_MODE +
++ * SET_DISPLAY_ON pair - are gone.  tb710fu_ctrl_fixup() keeps CMD_MODE_EN set
++ * alongside VIDEO_MODE_EN, i.e. the host runs in interleaved mode, and issuing
++ * a command into a live interleaved stream sets
++ * DSI_STATUS0_INTERLEAVE_OP_CONTENTION, which mainline treats as a real error
++ * (DSI_ERR_STATE_INTERLEAVE_OP_CONTENTION).  Seen on v92: the link was clean
++ * (st0=0x8, matching the ABL snapshot) until the round-5 read at t=69s, after
++ * which st0 became 0x2008, the frame counter restarted and the panel showed a
++ * band of link noise.  Those pokes were diagnostics for the "no card0" era;
++ * with the panel actually streaming they only corrupt the picture.
++ */
++
++static void dsi_diag_worker(struct work_struct *work)
++{
++	struct msm_dsi_host *msm_host = container_of(to_delayed_work(work),
++					struct msm_dsi_host, diag_work);
++	unsigned int frames = msm_host->diag_frames;
++	unsigned int round = msm_host->diag_rounds++;
++	const char *name = dev_name(&msm_host->pdev->dev);
++
++	msm_host->diag_frames = 0;
++	/*
++	 * dsi_wait4video_done() masks VIDEO_DONE again, and dsi_error() masks
++	 * ERROR after the first fault - which silently hides every later one.
++	 * Re-arm both so the heartbeat stays honest about ongoing errors.
++	 */
++	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_VIDEO_DONE, 1);
++	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_ERROR, 1);
++
++	/* keep the vendor register state intact against later reverts */
++	tb710fu_ctrl_fixup(msm_host);
++
++	/*
++	 * TB710FU: everything below is bring-up instrumentation that reads the
++	 * live link and printed at KERN_ERR every 10s per link.  It is opt-in
++	 * now that the panel streams (see tb_dsi_diag); the vendor-state fixup
++	 * above still runs every round either way.
++	 */
++	if (!tb_dsi_diag)
++		goto requeue;
++
++	/* v46's TPG auto-arm removed for v47: sync-dual-dsi round streams
++	 * real DSC video again.  The tpg= readback stays as a heartbeat
++	 * sanity field. */
++
++	/* Two lines: the combined one ran past the length the console logger
++	 * keeps, so the interesting tail (ack/irq) was getting cut off. */
++	pr_err("TBDSI-HB %s frames=%u ctrl=%#x st0=%#x fifo=%#x lane=%#x phy=%#x tpg=%#x\n",
++	       name, frames,
++	       dsi_read(msm_host, REG_DSI_CTRL),
++	       dsi_read(msm_host, REG_DSI_STATUS0),
++	       dsi_read(msm_host, REG_DSI_FIFO_STATUS),
++	       dsi_read(msm_host, REG_DSI_LANE_STATUS),
++	       dsi_read(msm_host, REG_DSI_DLN0_PHY_ERR),
++	       dsi_read(msm_host, REG_DSI_TEST_PATTERN_GEN_CTRL));
++	pr_err("TBDSI-HB %s vid=%#x acth=%#x tot=%#x clk=%#x to=%#x ack=%#x irq=%#x lctrl=%#x cctrl=%#x\n",
++	       name,
++	       dsi_read(msm_host, REG_DSI_VID_CFG0),
++	       dsi_read(msm_host, REG_DSI_ACTIVE_H),
++	       dsi_read(msm_host, REG_DSI_TOTAL),
++	       dsi_read(msm_host, REG_DSI_CLK_STATUS),
++	       dsi_read(msm_host, REG_DSI_TIMEOUT_STATUS),
++	       dsi_read(msm_host, REG_DSI_ACK_ERR_STATUS),
++	       dsi_read(msm_host, REG_DSI_INTR_CTRL),
++	       dsi_read(msm_host, REG_DSI_LANE_CTRL),
++	       dsi_read(msm_host, REG_DSI_CLK_CTRL));
++
++	/* one-shot: the rates the link clocks actually ended up running at.
++	 * esc in particular is never set explicitly on 6g hosts - it relies on
++	 * DT assigned-clocks, and our byte-patched vendor DTB may not carry
++	 * them, which would break every LP command's timing. */
++	if (round == 1)
++		pr_err("TBDSI-CLK %s byte=%lu esc=%lu pixel=%lu bintf=%lu\n",
++		       name,
++		       clk_get_rate(msm_host->byte_clk),
++		       clk_get_rate(msm_host->esc_clk),
++		       clk_get_rate(msm_host->pixel_clk),
++		       msm_host->byte_intf_clk ?
++		       clk_get_rate(msm_host->byte_intf_clk) : 0);
++
++	/* TB710FU v53: raw TLMM pad levels (no gpio_request involved) for
++	 * the touch die aliveness probe: GPIO162 = touch INT (idle HIGH via
++	 * the die's pull-up when powered), GPIO161 = touch reset (hogged
++	 * high), GPIO90/91 = AW37504 bias enables. */
++	if (round == 1) {
++		/* TB710FU v60: TLMM is 0x300000 (stride 0x1000), so the old
++		 * 0x60000 window did not even reach GPIO161/162 - those reads
++		 * ran off the end of the mapping and faulted the worker. */
++		void __iomem *tlmm = ioremap(0xf100000, 0x300000);
++
++		if (tlmm) {
++			pr_err("TBPAD int162=%d rst161=%d enp90=%d enn91=%d\n",
++			       readl_relaxed(tlmm + 162 * 0x1000 + 4) & 1,
++			       readl_relaxed(tlmm + 161 * 0x1000 + 4) & 1,
++			       readl_relaxed(tlmm + 90 * 0x1000 + 4) & 1,
++			       readl_relaxed(tlmm + 91 * 0x1000 + 4) & 1);
++			iounmap(tlmm);
++		}
++	}
++
++	/*
++	 * Controller-only runtime dump for the ABL-vs-ours diff.  Round 1
++	 * (~10-20s in) is the only one kept: the DSI controller window
++	 * (0x000..0x1ff) is what the heartbeat already reads every 10s, so it
++	 * is safe.  The late rounds (40/45, ~400-450s) also pulled
++	 * tb710fu_ours_ctrl_dump() and the DPU DSC/INTF dump, and reading
++	 * 0xae81000 while streaming kills the board with an asynchronous
++	 * SError - the source of the 495s silent reset.
++	 */
++	if (round == 1 && msm_host->id == DSI_0)
++		tb710fu_ours_ctrl_dump();
++
++requeue:
++	if (msm_host->enabled)
++		queue_delayed_work(msm_host->workqueue, &msm_host->diag_work,
++				   msecs_to_jiffies(TBDSI_DIAG_MS));
++}
++
+ static irqreturn_t dsi_host_irq(int irq, void *ptr)
+ {
+ 	struct msm_dsi_host *msm_host = ptr;
+@@ -1696,8 +1990,10 @@ static irqreturn_t dsi_host_irq(int irq, void *ptr)
+ 	if (isr & DSI_IRQ_ERROR)
+ 		dsi_error(msm_host);
+ 
+-	if (isr & DSI_IRQ_VIDEO_DONE)
++	if (isr & DSI_IRQ_VIDEO_DONE) {
++		msm_host->diag_frames++;
+ 		complete(&msm_host->video_comp);
++	}
+ 
+ 	if (isr & DSI_IRQ_CMD_DMA_DONE)
+ 		complete(&msm_host->dma_comp);
+@@ -2086,6 +2382,7 @@ int msm_dsi_host_init(struct msm_dsi *msm_dsi)
+ 		return -ENOMEM;
+ 
+ 	INIT_WORK(&msm_host->err_work, dsi_err_worker);
++	INIT_DELAYED_WORK(&msm_host->diag_work, dsi_diag_worker);
+ 
+ 	msm_dsi->id = msm_host->id;
+ 
+@@ -2350,7 +2647,10 @@ int msm_dsi_host_cmd_rx(struct mipi_dsi_host *host,
+ 		ret = dsi_long_read_resp(buf, msg);
+ 		break;
+ 	default:
+-		pr_warn("%s:Invalid response cmd\n", __func__);
++		/* TB710FU: dump the raw response header - 0x00 means silence,
++		 * anything else is the panel answering with an unexpected DT. */
++		pr_warn("%s:Invalid response cmd=%02x %02x %02x %02x\n",
++			__func__, buf[0], buf[1], buf[2], buf[3]);
+ 		ret = 0;
+ 	}
+ 
+@@ -2437,16 +2737,11 @@ int msm_dsi_host_enable(struct mipi_dsi_host *host)
+ 	dsi_op_mode_config(msm_host,
+ 		!!(msm_host->mode_flags & MIPI_DSI_MODE_VIDEO), true);
+ 
+-	/* TODO: clock should be turned off for command mode,
+-	 * and only turned on before MDP START.
+-	 * This part of code should be enabled once mdp driver support it.
+-	 */
+-	/* if (msm_panel->mode == MSM_DSI_CMD_MODE) {
+-	 *	dsi_link_clk_disable(msm_host);
+-	 *	pm_runtime_put(&msm_host->pdev->dev);
+-	 * }
+-	 */
++	tb710fu_ctrl_fixup(msm_host);
++
+ 	msm_host->enabled = true;
++	queue_delayed_work(msm_host->workqueue, &msm_host->diag_work,
++			   msecs_to_jiffies(TBDSI_DIAG_MS));
+ 	return 0;
+ }
+ 
+@@ -2455,6 +2750,7 @@ int msm_dsi_host_disable(struct mipi_dsi_host *host)
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
+ 	msm_host->enabled = false;
++	cancel_delayed_work_sync(&msm_host->diag_work);
+ 	dsi_op_mode_config(msm_host,
+ 		!!(msm_host->mode_flags & MIPI_DSI_MODE_VIDEO), false);
+ 
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_manager.c b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+index 959daa88b..86bb0b781 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -496,7 +496,7 @@ int msm_dsi_manager_connector_init(struct msm_dsi *msm_dsi,
+ int msm_dsi_manager_cmd_xfer(int id, const struct mipi_dsi_msg *msg)
+ {
+ 	struct msm_dsi *msm_dsi = dsi_mgr_get_dsi(id);
+-	struct msm_dsi *msm_dsi0 = dsi_mgr_get_dsi(DSI_0);
++	struct msm_dsi *msm_dsi1 = dsi_mgr_get_dsi(DSI_1);
+ 	struct mipi_dsi_host *host = msm_dsi->host;
+ 	bool is_read = (msg->rx_buf && msg->rx_len);
+ 	bool need_sync = (IS_SYNC_NEEDED() && !is_read);
+@@ -507,14 +507,16 @@ int msm_dsi_manager_cmd_xfer(int id, const struct mipi_dsi_msg *msg)
+ 
+ 	/* In bonded master case, panel requires the same commands sent to
+ 	 * both DSI links. Host issues the command trigger to both links
+-	 * when DSI_1 calls the cmd transfer function, no matter it happens
+-	 * before or after DSI_0 cmd transfer.
++	 * when DSI_0 calls the cmd transfer function, no matter it happens
++	 * before or after DSI_1 cmd transfer.
++	 * (map220v 51a92db: resync on DSI0 rather than DSI1 - the panel
++	 * device lives under dsi0, so dsi0 must be the trigger point.)
+ 	 */
+-	if (need_sync && (id == DSI_0))
++	if (need_sync && (id == DSI_1))
+ 		return is_read ? msg->rx_len : msg->tx_len;
+ 
+-	if (need_sync && msm_dsi0) {
+-		ret = msm_dsi_host_xfer_prepare(msm_dsi0->host, msg);
++	if (need_sync && msm_dsi1) {
++		ret = msm_dsi_host_xfer_prepare(msm_dsi1->host, msg);
+ 		if (ret) {
+ 			pr_err("%s: failed to prepare non-trigger host, %d\n",
+ 				__func__, ret);
+@@ -524,7 +526,7 @@ int msm_dsi_manager_cmd_xfer(int id, const struct mipi_dsi_msg *msg)
+ 	ret = msm_dsi_host_xfer_prepare(host, msg);
+ 	if (ret) {
+ 		pr_err("%s: failed to prepare host, %d\n", __func__, ret);
+-		goto restore_host0;
++		goto restore_host1;
+ 	}
+ 
+ 	ret = is_read ? msm_dsi_host_cmd_rx(host, msg) :
+@@ -532,9 +534,9 @@ int msm_dsi_manager_cmd_xfer(int id, const struct mipi_dsi_msg *msg)
+ 
+ 	msm_dsi_host_xfer_restore(host, msg);
+ 
+-restore_host0:
+-	if (need_sync && msm_dsi0)
+-		msm_dsi_host_xfer_restore(msm_dsi0->host, msg);
++restore_host1:
++	if (need_sync && msm_dsi1)
++		msm_dsi_host_xfer_restore(msm_dsi1->host, msg);
+ 
+ 	return ret;
+ }
+@@ -542,14 +544,14 @@ int msm_dsi_manager_cmd_xfer(int id, const struct mipi_dsi_msg *msg)
+ bool msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len)
+ {
+ 	struct msm_dsi *msm_dsi = dsi_mgr_get_dsi(id);
+-	struct msm_dsi *msm_dsi0 = dsi_mgr_get_dsi(DSI_0);
++	struct msm_dsi *msm_dsi1 = dsi_mgr_get_dsi(DSI_1);
+ 	struct mipi_dsi_host *host = msm_dsi->host;
+ 
+-	if (IS_SYNC_NEEDED() && (id == DSI_0))
++	if (IS_SYNC_NEEDED() && (id == DSI_1))
+ 		return false;
+ 
+-	if (IS_SYNC_NEEDED() && msm_dsi0)
+-		msm_dsi_host_cmd_xfer_commit(msm_dsi0->host, dma_base, len);
++	if (IS_SYNC_NEEDED() && msm_dsi1)
++		msm_dsi_host_cmd_xfer_commit(msm_dsi1->host, dma_base, len);
+ 
+ 	msm_dsi_host_cmd_xfer_commit(host, dma_base, len);
+ 
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
+index 1fb3899b8..4ed41cb36 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
+@@ -734,6 +734,105 @@ void __exit msm_dsi_phy_driver_unregister(void)
+ 	platform_driver_unregister(&dsi_phy_platform_driver);
+ }
+ 
++/*
++ * TB710FU: the ABL register snapshot differs from what mainline programs in a
++ * set of PHY PLL/lane analog registers (drive strength / bias tuning tables
++ * live here).  The vendor splash streams perfectly with these values, our
++ * link never reached the panel with mainline's.  Mirror the vendor state on
++ * every enable; offsets are physical-relative to the PHY base as captured.
++ */
++struct tb710fu_phy_reg { u16 off; u32 val; };
++static const struct tb710fu_phy_reg tb710fu_phy_fixup_dsi0[] = {
++	{ 0x0f4, 0x0000003d },
++	{ 0x138, 0x00000096 },
++	{ 0x528, 0x000000c0 },
++	{ 0x5ac, 0x0000003f },
++	{ 0x5e4, 0x0000000c },
++	{ 0x698, 0x00000000 },
++	{ 0x6b8, 0x0000002a },
++	{ 0x6bc, 0x00000056 },
++	{ 0x6c0, 0x00000096 },
++	{ 0x6c4, 0x00000000 },
++	{ 0x6c8, 0x00000000 },
++	{ 0x6f4, 0x000000af },
++	{ 0x6f8, 0x00000002 },
++	{ 0x718, 0x0000002a },
++	{ 0x730, 0x00000011 },
++	{ 0x748, 0x00000020 },
++	{ 0x774, 0x00000000 },
++	{ 0x77c, 0x00000076 },
++	{ 0x8f4, 0x0000003d },
++	{ 0x938, 0x00000096 },
++	{ 0x93c, 0x0000000b },
++	{ 0x944, 0x00000058 },
++};
++static const struct tb710fu_phy_reg tb710fu_phy_fixup_dsi1[] = {
++	{ 0x03c, 0x00000000 },
++	{ 0x0f4, 0x0000003d },
++	{ 0x138, 0x00000096 },
++	{ 0x140, 0x00000019 },
++	{ 0x528, 0x000000c0 },
++	{ 0x590, 0x00000029 },
++	{ 0x594, 0x0000002a },
++	{ 0x5bc, 0x00000010 },
++	{ 0x5e0, 0x00000041 },
++	{ 0x5e4, 0x000000ab },
++	{ 0x5e8, 0x0000006a },
++	{ 0x660, 0x0000000c },
++	{ 0x670, 0x00000054 },
++	{ 0x6b0, 0x00000022 },
++	{ 0x6b4, 0x00000000 },
++	{ 0x6b8, 0x00000000 },
++	{ 0x6bc, 0x00000000 },
++	{ 0x6c0, 0x00000000 },
++	{ 0x6c4, 0x00000000 },
++	{ 0x6c8, 0x00000000 },
++	{ 0x6cc, 0x00000001 },
++	{ 0x6f4, 0x00000000 },
++	{ 0x6f8, 0x00000000 },
++	{ 0x718, 0x00000082 },
++	{ 0x740, 0x00000000 },
++	{ 0x748, 0x00000040 },
++	{ 0x758, 0x00000003 },
++	{ 0x77c, 0x00000000 },
++	{ 0x83c, 0x00000000 },
++	{ 0x8f4, 0x0000003d },
++	{ 0x938, 0x00000096 },
++	{ 0x940, 0x00000019 },
++};
++
++static void tb710fu_phy_fixup(struct msm_dsi_phy *phy)
++{
++	const struct tb710fu_phy_reg *tbl;
++	unsigned int n = 0, i;
++	struct resource *res;
++	void __iomem *base;
++	resource_size_t start;
++
++	res = platform_get_resource(phy->pdev, IORESOURCE_MEM, 0);
++	if (!res)
++		return;
++	start = res->start;
++	if (start == 0x0ae95000) {
++		tbl = tb710fu_phy_fixup_dsi0;
++		n = ARRAY_SIZE(tb710fu_phy_fixup_dsi0);
++	} else if (start == 0x0ae97000) {
++		tbl = tb710fu_phy_fixup_dsi1;
++		n = ARRAY_SIZE(tb710fu_phy_fixup_dsi1);
++	} else {
++		return;
++	}
++
++	base = ioremap(start, 0x2000);
++	if (!base)
++		return;
++	for (i = 0; i < n; i++)
++		writel_relaxed(tbl[i].val, base + tbl[i].off);
++	wmb();
++	iounmap(base);
++	pr_info("TBFIXUP phy %pa: %u vendor registers applied\n", &start, n);
++}
++
+ int msm_dsi_phy_enable(struct msm_dsi_phy *phy,
+ 			struct msm_dsi_phy_clk_request *clk_req,
+ 			struct msm_dsi_phy_shared_timings *shared_timings)
+@@ -755,8 +854,7 @@ int msm_dsi_phy_enable(struct msm_dsi_phy *phy,
+ 
+ 	ret = regulator_bulk_enable(phy->cfg->num_regulators, phy->supplies);
+ 	if (ret) {
+-		DRM_DEV_ERROR(dev, "%s: regulator enable failed, %d\n",
+-			__func__, ret);
++		DRM_DEV_ERROR(dev, "%s: regulator enable failed, %d\n", __func__, ret);
+ 		goto reg_en_fail;
+ 	}
+ 
+@@ -766,6 +864,8 @@ int msm_dsi_phy_enable(struct msm_dsi_phy *phy,
+ 		goto phy_en_fail;
+ 	}
+ 
++	tb710fu_phy_fixup(phy);
++
+ 	memcpy(shared_timings, &phy->timing.shared_timings,
+ 	       sizeof(*shared_timings));
+ 
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
+index 5d805a797..20fe531c5 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
+@@ -987,6 +987,36 @@ static int dsi_7nm_phy_enable(struct msm_dsi_phy *phy,
+ 		return -EINVAL;
+ 	}
+ 
++	/*
++	 * TB710FU bring-up: the vendor tree carries explicit PHY timings for
++	 * this panel (qcom,mdss-dsi-panel-phy-timings) that downstream writes
++	 * verbatim to TIMING_CTRL_0..13, and the panel stays black with the
++	 * calculated ones - while HS reads get no response, which points at the
++	 * panel never locking the HS receive.  Override with the vendor's
++	 * values; the three registers this driver hard-codes (T9=0x02,
++	 * T10=0x04, T11=0x00) already match the vendor array, which pins the
++	 * mapping.
++	 */
++	pr_err("TBPHTAG %s calc: clk_zero=%u clk_prep=%u clk_trail=%u hs_exit=%u hs_zero=%u hs_prep=%u hs_trail=%u hs_rqst=%u clk_pre=%u clk_post=%u\n",
++	       dev_name(&phy->pdev->dev),
++	       timing->clk_zero, timing->clk_prepare, timing->clk_trail,
++	       timing->hs_exit, timing->hs_zero, timing->hs_prepare,
++	       timing->hs_trail, timing->hs_rqst,
++	       timing->shared_timings.clk_pre, timing->shared_timings.clk_post);
++
++	timing->clk_zero = 0x27;
++	timing->clk_prepare = 0x0a;
++	timing->clk_trail = 0x0a;
++	timing->hs_exit = 0x1b;
++	timing->hs_zero = 0x19;
++	timing->hs_prepare = 0x0a;
++	timing->hs_trail = 0x0b;
++	timing->hs_rqst = 0x0a;
++	timing->shared_timings.clk_pre = 0x20;
++	timing->shared_timings.clk_post = 0x0f;
++	pr_err("TBPHTAG %s overridden with vendor nt36532 timings\n",
++	       dev_name(&phy->pdev->dev));
++
+ 	if (dsi_phy_hw_v4_0_is_pll_on(phy))
+ 		pr_warn("PLL turned on before configuring PHY\n");
+ 
+@@ -1049,7 +1079,12 @@ static int dsi_7nm_phy_enable(struct msm_dsi_phy *phy,
+ 		} else {
+ 			vreg_ctrl_0 = 0x44;
+ 			vreg_ctrl_1 = 0x19;
+-			glbl_rescode_top_ctrl = less_than_1500_mhz ? 0x3c :  0x03;
++			/* sm8650 (v4.3.2/v5.2) DPHY: match downstream values,
++			 * rescode_top must be 0x3d at <1500MHz before PHY
++			 * power-up so HS swing calibration uses the right
++			 * reference (ABL/stock writes 0x3d).
++			 */
++			glbl_rescode_top_ctrl = less_than_1500_mhz ? 0x3d :  0x01;
+ 			glbl_rescode_bot_ctrl = less_than_1500_mhz ? 0x38 :  0x3c;
+ 		}
+ 	} else if ((phy->cfg->quirks & DSI_PHY_7NM_QUIRK_V4_3)) {
+diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+index cbdf7b8f7..5b40b237b 100644
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -654,6 +654,15 @@ config DRM_PANEL_NOVATEK_NT35950
+ 	  Sharp panels used in Sony Xperia Z5 Premium and XZ Premium
+ 	  mobile phones.
+ 
++config DRM_PANEL_NOVATEK_NT36532_WQHD
++	tristate "Novatek NT36532 WQHD dual-DSI panel driver"
++	depends on OF
++	depends on DRM_MIPI_DSI
++	help
++	  Say Y here if you want to enable support for the Novatek NT36532
++	  WQHD dual-DSI DSC panel as found in the Lenovo Xiaoxin Pad Pro GT
++	  (TB710FU).
++
+ config DRM_PANEL_NOVATEK_NT36523
+ 	tristate "Novatek NT36523 panel driver"
+ 	depends on OF
+@@ -1413,6 +1422,16 @@ config DRM_PANEL_XINPENG_XPP055C272
+ 	depends on BACKLIGHT_CLASS_DEVICE
+ 	help
+ 	  Say Y here if you want to enable support for the Xinpeng
+-	  XPP055C272 controller for 720x1280 LCD panels with MIPI/RGB/SPI
+-	  system interfaces.
++          XPP055C272 controller for 720x1280 LCD panels with MIPI/RGB/SPI
++          system interfaces.
++
++config DRM_PANEL_NT36532_WQHD_DUAL_DSI
++	tristate "Lenovo TB710FU Novatek NT36532 WQHD dual-DSI DSC panel"
++	depends on OF
++	depends on DRM_MIPI_DSI
++	depends on BACKLIGHT_CLASS_DEVICE
++	help
++	  Say Y here for the Novatek NT36532 WQHD (3200x2000) dual-DSI DSC
++	  panel as found on the Lenovo Xiaoxin Pad Pro GT (TB710FU).
++
+ endmenu
+diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+index 3b523cf37..691cb2ead 100644
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -64,6 +64,7 @@ obj-$(CONFIG_DRM_PANEL_NOVATEK_NT35532) += panel-novatek-nt35532.o
+ obj-$(CONFIG_DRM_PANEL_NOVATEK_NT35560) += panel-novatek-nt35560.o
+ obj-$(CONFIG_DRM_PANEL_NOVATEK_NT35950) += panel-novatek-nt35950.o
+ obj-$(CONFIG_DRM_PANEL_NOVATEK_NT36523) += panel-novatek-nt36523.o
++obj-$(CONFIG_DRM_PANEL_NOVATEK_NT36532_WQHD) += panel-novatek-nt36532-wqhd.o
+ obj-$(CONFIG_DRM_PANEL_NOVATEK_NT36536) += panel-novatek-nt36536.o
+ obj-$(CONFIG_DRM_PANEL_NOVATEK_NT36672A) += panel-novatek-nt36672a.o
+ obj-$(CONFIG_DRM_PANEL_NOVATEK_NT36672E) += panel-novatek-nt36672e.o
+@@ -137,3 +138,4 @@ obj-$(CONFIG_DRM_PANEL_VISIONOX_VTDR6130) += panel-visionox-vtdr6130.o
+ obj-$(CONFIG_DRM_PANEL_VISIONOX_R66451) += panel-visionox-r66451.o
+ obj-$(CONFIG_DRM_PANEL_WIDECHIPS_WS2401) += panel-widechips-ws2401.o
+ obj-$(CONFIG_DRM_PANEL_XINPENG_XPP055C272) += panel-xinpeng-xpp055c272.o
++obj-$(CONFIG_DRM_PANEL_NT36532_WQHD_DUAL_DSI) += panel-nt36532-wqhd-dual-dsi-dsc.o
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36523.c b/drivers/gpu/drm/panel/panel-novatek-nt36523.c
+index 34b9123d3..78b1f9d31 100644
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36523.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36523.c
+@@ -8,6 +8,7 @@
+ #include <linux/backlight.h>
+ #include <linux/delay.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/gpio.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/of_graph.h>
+@@ -15,6 +16,8 @@
+ 
+ #include <video/mipi_display.h>
+ 
++#include <drm/display/drm_dsc.h>
++#include <drm/display/drm_dsc_helper.h>
+ #include <drm/drm_connector.h>
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_mipi_dsi.h>
+@@ -29,10 +32,13 @@ struct panel_info {
+ 	struct mipi_dsi_device *dsi[2];
+ 	const struct panel_desc *desc;
+ 	enum drm_panel_orientation orientation;
++	/* per-instance copy: the DSI host fills pic_width/pic_height in */
++	struct drm_dsc_config dsc;
+ 
+ 	struct gpio_desc *reset_gpio;
++	struct gpio_descs *avdd_en;
+ 	struct backlight_device *backlight;
+-	struct regulator *vddio;
++	struct regulator_bulk_data supplies[3];
+ };
+ 
+ struct panel_desc {
+@@ -43,6 +49,7 @@ struct panel_desc {
+ 	unsigned int lanes;
+ 	unsigned long mode_flags;
+ 	enum mipi_dsi_pixel_format format;
++	const struct drm_dsc_config *dsc_cfg;
+ 
+ 	const struct drm_display_mode *modes;
+ 	unsigned int num_modes;
+@@ -993,26 +1000,143 @@ static void nt36523_reset(struct panel_info *pinfo)
+ 	usleep_range(12000, 13000);
+ }
+ 
++static void tb710fu_te_check(struct work_struct *work);
++static DECLARE_DELAYED_WORK(tb710fu_te_work, tb710fu_te_check);
++
+ static int nt36523_prepare(struct drm_panel *panel)
+ {
+ 	struct panel_info *pinfo = to_panel_info(panel);
+ 	int ret;
+ 
+-	ret = regulator_enable(pinfo->vddio);
+-	if (ret) {
+-		dev_err(panel->dev, "failed to enable vddio regulator: %d\n", ret);
++	ret = regulator_bulk_enable(ARRAY_SIZE(pinfo->supplies), pinfo->supplies);
++	if (ret < 0) {
++		dev_err(panel->dev, "failed to enable panel regulators: %d\n", ret);
+ 		return ret;
+ 	}
+ 
++	/* TB710FU v40: raise the AW37504 bias enables before the reset, and
++	 * give the charge pumps a moment - the stock order is vddio/vci/vdd
++	 * on, avdd on, then the reset sequence. */
++	if (pinfo->avdd_en) {
++		unsigned long vals = GENMASK(pinfo->avdd_en->ndescs - 1, 0);
++
++		gpiod_set_array_value_cansleep(pinfo->avdd_en->ndescs,
++					       pinfo->avdd_en->desc,
++					       pinfo->avdd_en->info, &vals);
++		usleep_range(10000, 11000);
++	}
++
++	/* v23 takeover experiment proved useless: the panel stays black with
++	 * ABL's own state, so there is no known-good state to preserve. */
+ 	nt36523_reset(pinfo);
+ 
++	/*
++	 * TB710FU v36 timing experiment: ABL initializes this panel seconds
++	 * after power-on and the panel accepts it; our warm-reboot replay of
++	 * the identical sequence never gets acknowledged.  Hold LP-11 for
++	 * 200 ms after the reset before the first command, matching the
++	 * vendor's lp11-init flow, in case the panel wants a long quiet bus
++	 * after coming out of reset.
++	 */
++	usleep_range(200000, 210000);
++
++	/*
++	 * TB710FU bring-up: the host is enabled before the panel gets
++	 * prepared, but the video engine is not streaming yet, so the link
++	 * sits idle at LP-11 here - exactly the state lp11-init asks for and
++	 * the only moment a DCS read is not fighting the video stream.  A
++	 * live panel fresh out of reset answers GET_DISPLAY_ID with three
++	 * bytes and GET_POWER_MODE with 0x10 (still asleep); zero bytes back
++	 * means the fault is upstream of the init sequence entirely, not in
++	 * the video stream.
++	 */
++	{
++		u8 rx[3] = { 0xff, 0xff, 0xff };
++		ssize_t rid, rpm;
++
++		rid = mipi_dsi_dcs_read(pinfo->dsi[0], MIPI_DCS_GET_DISPLAY_ID, rx, 3);
++		pr_err("TBPANEL pre-init dsi0 display_id ret=%zd rx=%02x %02x %02x\n",
++		       rid, rx[0], rx[1], rx[2]);
++
++		rx[0] = 0xff;
++		rpm = mipi_dsi_dcs_read(pinfo->dsi[0], MIPI_DCS_GET_POWER_MODE, rx, 1);
++		pr_err("TBPANEL pre-init dsi0 power_mode ret=%zd val=%#x\n", rpm, rx[0]);
++	}
++
+ 	ret = pinfo->desc->init_sequence(pinfo);
+ 	if (ret < 0) {
+-		regulator_disable(pinfo->vddio);
++		regulator_bulk_disable(ARRAY_SIZE(pinfo->supplies), pinfo->supplies);
+ 		dev_err(panel->dev, "failed to initialize panel: %d\n", ret);
+ 		return ret;
+ 	}
+ 
++	{
++		u8 rx = 0xff;
++		ssize_t rpm = mipi_dsi_dcs_read(pinfo->dsi[0], MIPI_DCS_GET_POWER_MODE, &rx, 1);
++
++		pr_err("TBPANEL post-init dsi0 power_mode ret=%zd val=%#x\n", rpm, rx);
++	}
++
++	/* TB710FU bring-up: the host provably encodes DSC (the DSI timing
++	 * registers decode to the compressed line length), so print what the
++	 * panel was told to decode and check it against the vendor's 0x91. */
++	if (pinfo->desc->dsc_cfg)
++		pr_err("TBPANEL dsc %u.%u pic=%ux%u slice=%ux%u n=%u chunk=%u bpp=%u bpc=%u lbd=%u bp=%u rgb=%u\n",
++		       pinfo->dsc.dsc_version_major, pinfo->dsc.dsc_version_minor,
++		       pinfo->dsc.pic_width, pinfo->dsc.pic_height,
++		       pinfo->dsc.slice_width, pinfo->dsc.slice_height,
++		       pinfo->dsc.slice_count, pinfo->dsc.slice_chunk_size,
++		       pinfo->dsc.bits_per_pixel, pinfo->dsc.bits_per_component,
++		       pinfo->dsc.line_buf_depth, pinfo->dsc.block_pred_enable,
++		       pinfo->dsc.convert_rgb);
++
++	/* TB710FU bring-up: print the complete computed DSC configuration -
++	 * the RC threshold/quant tables are what the panel's decoder must
++	 * agree with, and a bpc-dependent table bug would produce exactly our
++	 * silent-black symptom. */
++	{
++		const struct drm_dsc_config *d = &pinfo->dsc;
++		int i;
++
++		pr_err("TBSC rc_params bpc=%u bpp=%u/%u slice=%ux%u n=%u chunk=%u\n",
++		       d->bits_per_component, d->bits_per_pixel >> 4,
++		       d->bits_per_pixel & 0xf, d->slice_width, d->slice_height,
++		       d->slice_count, d->slice_chunk_size);
++		pr_err("TBSC xmit=%u init_scale=%u inc_int=%u dec_int=%u first_bpg=%u slice_bpg=%u final=%u model=%u qincr0=%u qincr1=%u\n",
++		       d->initial_xmit_delay, d->initial_scale_value,
++		       d->scale_increment_interval, d->scale_decrement_interval,
++		       d->first_line_bpg_offset, d->slice_bpg_offset,
++		       d->final_offset, d->rc_model_size,
++		       d->rc_quant_incr_limit0, d->rc_quant_incr_limit1);
++		for (i = 0; i < 14; i += 7)
++			pr_err("TBSC thresh[%d..]=%u %u %u %u %u %u %u\n", i,
++			       d->rc_buf_thresh[i], d->rc_buf_thresh[i + 1],
++			       d->rc_buf_thresh[i + 2], d->rc_buf_thresh[i + 3],
++			       d->rc_buf_thresh[i + 4], d->rc_buf_thresh[i + 5],
++			       d->rc_buf_thresh[i + 6]);
++		for (i = 0; i < 15; i += 5)
++			pr_err("TBSC range[%d..] min=%u %u %u %u %u max=%u %u %u %u %u bpg=%u %u %u %u %u\n",
++			       i,
++			       d->rc_range_params[i].range_min_qp,
++			       d->rc_range_params[i + 1].range_min_qp,
++			       d->rc_range_params[i + 2].range_min_qp,
++			       d->rc_range_params[i + 3].range_min_qp,
++			       d->rc_range_params[i + 4].range_min_qp,
++			       d->rc_range_params[i].range_max_qp,
++			       d->rc_range_params[i + 1].range_max_qp,
++			       d->rc_range_params[i + 2].range_max_qp,
++			       d->rc_range_params[i + 3].range_max_qp,
++			       d->rc_range_params[i + 4].range_max_qp,
++			       d->rc_range_params[i].range_bpg_offset,
++			       d->rc_range_params[i + 1].range_bpg_offset,
++			       d->rc_range_params[i + 2].range_bpg_offset,
++			       d->rc_range_params[i + 3].range_bpg_offset,
++			       d->rc_range_params[i + 4].range_bpg_offset);
++	}
++
++	/* TB710FU bring-up: probe panel aliveness via its TE output. */
++	schedule_delayed_work(&tb710fu_te_work, msecs_to_jiffies(300));
++
+ 	return 0;
+ }
+ 
+@@ -1043,7 +1167,12 @@ static int nt36523_unprepare(struct drm_panel *panel)
+ 	struct panel_info *pinfo = to_panel_info(panel);
+ 
+ 	gpiod_set_value_cansleep(pinfo->reset_gpio, 1);
+-	regulator_disable(pinfo->vddio);
++	if (pinfo->avdd_en) {
++		gpiod_set_array_value_cansleep(pinfo->avdd_en->ndescs,
++					       pinfo->avdd_en->desc,
++					       pinfo->avdd_en->info, 0UL);
++	}
++	regulator_bulk_disable(ARRAY_SIZE(pinfo->supplies), pinfo->supplies);
+ 
+ 	return 0;
+ }
+@@ -1170,14 +1299,43 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
+ 	if (IS_ERR(pinfo))
+ 		return PTR_ERR(pinfo);
+ 
+-	pinfo->vddio = devm_regulator_get(dev, "vddio");
+-	if (IS_ERR(pinfo->vddio))
+-		return dev_err_probe(dev, PTR_ERR(pinfo->vddio), "failed to get vddio regulator\n");
++	/*
++	 * TB710FU v39: the stock panel node carries FOUR supplies - vddio
++	 * (1.9V), vci (3.0V, l13b), vdd (1.2V core, l11b) and avdd (5.8V
++	 * bias from the AW37504 boost on i2c6).  ABL's Panel_Default_PowerDown
++	 * cuts vci/avdd before the kernel runs, so powering only vddio (as we
++	 * did) left the panel core dead - which is exactly the zero-response
++	 * symptom on every read and the missing TE edges.  Enable all three
++	 * controllable rails; avdd has no driver yet (GPIO 90/91 keep ABL's
++	 * state) and gets one once the aw37504 regulator lands.
++	 */
++	pinfo->supplies[0].supply = "vddio";
++	pinfo->supplies[1].supply = "vci";
++	pinfo->supplies[2].supply = "vdd";
++	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(pinfo->supplies),
++				      pinfo->supplies);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "failed to get panel regulators\n");
+ 
+ 	pinfo->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
+ 	if (IS_ERR(pinfo->reset_gpio))
+ 		return dev_err_probe(dev, PTR_ERR(pinfo->reset_gpio), "failed to get reset gpio\n");
+ 
++	/*
++	 * TB710FU v40: the LCD bias (AVDD +/-5.8V) comes from an AW37504
++	 * boost on i2c6 whose ENP/ENN enable pins are wired to TLMM 90/91
++	 * (stock qcom,platform-bais-enp/enn-gpio).  ABL's powerdown cuts the
++	 * bias and nothing re-enables it, so the panel shows *black* (not
++	 * white) with the backlight on.  Drive the enable pins from here -
++	 * the vendor aw3750x driver is a 2271-line pinctrl/state monster we
++	 * do not need.
++	 */
++	pinfo->avdd_en = devm_gpiod_get_array_optional(dev, "avdd-en",
++						       GPIOD_OUT_LOW);
++	if (IS_ERR(pinfo->avdd_en))
++		return dev_err_probe(dev, PTR_ERR(pinfo->avdd_en),
++				     "failed to get avdd-en gpios\n");
++
+ 	pinfo->desc = of_device_get_match_data(dev);
+ 	if (!pinfo->desc)
+ 		return -ENODEV;
+@@ -1228,10 +1386,15 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
+ 
+ 	drm_panel_add(&pinfo->panel);
+ 
++	if (pinfo->desc->dsc_cfg)
++		pinfo->dsc = *pinfo->desc->dsc_cfg;
++
+ 	for (i = 0; i < DSI_NUM_MIN + pinfo->desc->is_dual_dsi; i++) {
+ 		pinfo->dsi[i]->lanes = pinfo->desc->lanes;
+ 		pinfo->dsi[i]->format = pinfo->desc->format;
+ 		pinfo->dsi[i]->mode_flags = pinfo->desc->mode_flags;
++		if (pinfo->desc->dsc_cfg)
++			pinfo->dsi[i]->dsc = &pinfo->dsc;
+ 
+ 		ret = devm_mipi_dsi_attach(dev, pinfo->dsi[i]);
+ 		if (ret < 0)
+@@ -1241,6 +1404,290 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
+ 	return 0;
+ }
+ 
++/*
++ * Lenovo Xiaoxin Pad Pro GT (TB710FU): Novatek NT36532, 1600x2000 per DSI link
++ * (3200x2000 combined), video mode, 30 bpp, dual DSI.  The init sequence below is
++ * the vendor's own, decoded from its qcom,mdss-dsi-on-command byte stream (the
++ * upstream DSI packet header is dtype, last, vc, ack, wait, then a big-endian u16
++ * length) with the millisecond waits kept.
++ */
++/*
++ * TB710FU bring-up: the vendor tree wires the panel's TE output to TLMM
++ * GPIO 86 (qcom,platform-te-gpio) and runs its ESD check on it, so a live,
++ * display-on panel toggles TE at the frame rate.  Count edges over 100 ms -
++ * this probes panel aliveness without touching the DSI read path, which is
++ * useless to us if the board's data lanes are unidirectional.
++ */
++#define TB710FU_TE_GPIO 86
++
++static void tb710fu_te_check(struct work_struct *work)
++{
++	void __iomem *tlmm;
++	int prev, cur, edges = 0, i;
++
++	/*
++	 * Read the gpio86 pad straight out of the TLMM: gpio_request() on this
++	 * pin fails for reasons unclear, and the pin's mux/enable state is
++	 * whatever ABL left behind - which is exactly what we want, since ABL
++	 * had the panel driving TE into it.
++	 */
++	tlmm = ioremap(0xf100000, 0x60000);
++	if (!tlmm) {
++		pr_err("TBPANEL te: tlmm ioremap failed\n");
++		return;
++	}
++
++	prev = readl_relaxed(tlmm + 86 * 0x1000 + 4) & 1;
++	for (i = 0; i < 2000; i++) {
++		udelay(50);
++		cur = readl_relaxed(tlmm + 86 * 0x1000 + 4) & 1;
++		if (cur != prev) {
++			edges++;
++			prev = cur;
++		}
++	}
++	iounmap(tlmm);
++
++	pr_err("TBPANEL te edges=%d over 100ms (0 = panel silent, ~24 = alive at 120Hz)\n",
++	       edges);
++}
++
++/*
++ * TB710FU: the vendor byte stream sends 0xC0/0x98 as DCS long writes (0x39)
++ * even though each carries a single parameter; mipi_dsi_dcs_write_buffer()
++ * would downgrade that to a short write (0x15).  Replay the vendor framing.
++ */
++static void tb710fu_vendor_long_write(struct panel_info *pinfo,
++				      const u8 *buf, size_t len)
++{
++	struct mipi_dsi_msg msg = {
++		.type = MIPI_DSI_DCS_LONG_WRITE,
++		.tx_buf = buf,
++		.tx_len = len,
++	};
++	int i;
++
++	for (i = 0; i < 2; i++) {
++		ssize_t ret;
++
++		if (!pinfo->dsi[i])
++			continue;
++		msg.channel = pinfo->dsi[i]->channel;
++		ret = pinfo->dsi[i]->host->ops->transfer(pinfo->dsi[i]->host, &msg);
++		if (ret < 0)
++			pr_err("TBPANEL vendor long write %#x dsi%d failed: %zd\n",
++			       buf[0], i, ret);
++	}
++}
++
++static int tb710fu_nt36532_init_sequence(struct panel_info *pinfo)
++{
++	struct mipi_dsi_device *dsi0 = pinfo->dsi[0];
++	struct mipi_dsi_device *dsi1 = pinfo->dsi[1];
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = NULL };
++
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xff, 0x2a);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xfb, 0x01);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xbc, 0x66, 0x06);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xff, 0xf0);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xfb, 0x01);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xfa, 0x05);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x76, 0x16);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xff, 0x27);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xfb, 0x01);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xd0, 0x13);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xd1, 0x54);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xd2, 0x38);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xde, 0x40);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xdf, 0x02);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xff, 0x23);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xfb, 0x01);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x00, 0x80);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x05, 0x24);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x07, 0x00);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x08, 0x01);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x09, 0xc2);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x10, 0x00);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x11, 0x03);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x12, 0xeb);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x15, 0x15);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x16, 0x13);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x30, 0xff);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x31, 0xff);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x32, 0xff);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x33, 0xfc);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x34, 0xf9);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x35, 0xf5);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x36, 0xf2);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x37, 0xf0);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x38, 0xed);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x39, 0xeb);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x3a, 0xe8);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x3b, 0xe5);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x3d, 0xe3);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x3f, 0xe0);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x40, 0xde);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x41, 0xdb);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x58, 0xff);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x59, 0xff);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x5a, 0xfa);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x5b, 0xf7);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x5c, 0xf2);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x5d, 0xeb);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x5e, 0xe3);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x5f, 0xd9);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x60, 0xd1);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x61, 0xcc);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x62, 0xc7);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x63, 0xbf);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x64, 0xba);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x65, 0xb5);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x66, 0xb0);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x67, 0xab);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x19, 0x00);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x1a, 0x02);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x1b, 0x04);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x1c, 0x08);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x1d, 0x0e);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x1e, 0x14);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x1f, 0x18);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x20, 0x1e);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x21, 0x22);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x22, 0x26);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x23, 0x2a);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x24, 0x30);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x25, 0x34);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x26, 0x38);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x27, 0x3c);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x28, 0x3f);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x29, 0x10);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x2b, 0x28);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xff, 0x25);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xfb, 0x01);
++	tb710fu_vendor_long_write(pinfo, (const u8[]){0xc0, 0x0c}, 2);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xff, 0x24);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xfb, 0x01);
++	tb710fu_vendor_long_write(pinfo, (const u8[]){0x98, 0x80}, 2);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xff, 0x10);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xfb, 0x01);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x53, 0x24);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x55, 0x01);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x3b, 0x03, 0xea, 0x1a, 0x04, 0x04, 0x00);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x90, 0x03);
++	/*
++	 * TB710FU v39: the vendor's 0x91/0x92 writes are Novatek's
++	 * proprietary DSC decoder configuration, and the working reference
++	 * driver sends the standard DCS PPS (0x9E) in exactly this position
++	 * - after DSC enable (0x90 0x03), before 0x9d/0xb2/0xb3 - instead of
++	 * them.  v38 proved PPS at the *start* of the sequence alongside the
++	 * two proprietary writes does nothing; one decoder config, in the
++	 * reference's slot, is what the panel gets.
++	 */
++	{
++		struct drm_dsc_picture_parameter_set pps;
++		int i;
++
++		drm_dsc_pps_payload_pack(&pps, &pinfo->dsc);
++		for (i = 0; i < 2; i++) {
++			int ret = mipi_dsi_picture_parameter_set(pinfo->dsi[i], &pps);
++
++			if (ret < 0)
++				pr_err("TBPANEL pps dsi%d failed: %d\n", i, ret);
++		}
++	}
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x9d, 0x01);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xb2, 0x91);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0xb3, 0x40);
++	/*
++	 * EXIT_SLEEP_MODE and SET_DISPLAY_ON take no parameter, and that is how
++	 * every other dual-DSI panel in this driver sends them.  The vendor's
++	 * byte stream encodes both as "short write with 1 parameter" (dtype
++	 * 0x15, len 2), which is what this used to replay literally - and the
++	 * panel then answered GET_POWER_MODE with 0x00, i.e. still asleep.
++	 * Send them in the parameterless form the spec defines.
++	 */
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x11);
++	msleep(120);
++	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, dsi0, dsi1, 0x29);
++	msleep(20);
++
++	return 0;
++}
++
++/*
++ * DSC, straight out of the vendor node's qcom,mdss-dsc-* properties:
++ * bit-per-pixel 8, bit-per-component 10, one encoder, slice 800x20, two slices
++ * per packet, DSC 1.2, block prediction on.  800 is half of one link's 1600
++ * columns, so with the full 3200-wide mode the slice maths give two slices per
++ * link per line and two packets per line - exactly the vendor's numbers.
++ */
++static const struct drm_dsc_config tb710fu_nt36532_dsc_cfg = {
++	.dsc_version_major = 1,
++	.dsc_version_minor = 2,
++	.slice_height = 20,
++	.slice_width = 800,
++	.slice_count = 2,
++	.bits_per_component = 10,
++	.bits_per_pixel = 8 << 4,
++	.block_pred_enable = true,
++};
++
++static const struct drm_display_mode tb710fu_nt36532_modes[] = {
++	{
++		/* 3200x2000 at 120 Hz - the *panel's* size, not one link's.
++		 *
++		 * The vendor tree describes this panel as 1600 wide per DSI link
++		 * (qcom,mdss-dsi-panel-width = <1600>) with two links, so the two
++		 * links split one 3200x2000 image.  Mainline's dual-DSI support
++		 * does that split itself, halving the horizontal timings for each
++		 * host.  Reporting 1600 here therefore made each host drive 800
++		 * pixel columns, and the resulting timing mismatch showed up as a
++		 * continuous stream of "dsi_err_worker: status=5".
++		 *
++		 * Every horizontal number is the vendor's per-link value times two:
++		 * the vendor's porches are per link (138/8/16), so the full-width
++		 * mode needs 276/16/32.
++		 *
++		 * The refresh rate is 120 Hz because that is the only rate at which
++		 * the vendor ever clocks the link.  Its
++		 * qcom,mdss-dsi-panel-clockrate of 0x47686D10 is 1198 Mbps per
++		 * lane, which is exactly what mainline's dsi_byte_clk_get_rate()
++		 * derives from this mode (955,708,000 -> 1178/3524 -> /2 ->
++		 * *30/32 -> *8), while a 60 Hz mode would derive half of it.  The
++		 * vendor's dynamic-fps support changes refresh by stretching the
++		 * vertical front porch only, so the panel has never seen another
++		 * link rate.
++		 */
++		.clock = (3200 + 276 + 16 + 32) * (2000 + 26 + 2 + 232) * 120 / 1000,
++		.hdisplay = 3200,
++		.hsync_start = 3200 + 276,
++		.hsync_end = 3200 + 276 + 16,
++		.htotal = 3200 + 276 + 16 + 32,
++		.vdisplay = 2000,
++		.vsync_start = 2000 + 26,
++		.vsync_end = 2000 + 26 + 2,
++		.vtotal = 2000 + 26 + 2 + 232,
++	},
++};
++
++static const struct panel_desc tb710fu_nt36532_desc = {
++	.modes = tb710fu_nt36532_modes,
++	.num_modes = ARRAY_SIZE(tb710fu_nt36532_modes),
++	.dsi_info = {
++		.type = "nt36532",
++		.channel = 0,
++		.node = NULL,
++	},
++	.bpc = 10,
++	.lanes = 4,
++	.format = MIPI_DSI_FMT_RGB101010,
++	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_CLOCK_NON_CONTINUOUS |
++		      MIPI_DSI_MODE_LPM | MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT,
++	.dsc_cfg = &tb710fu_nt36532_dsc_cfg,
++	.init_sequence = tb710fu_nt36532_init_sequence,
++	.is_dual_dsi = true,
++};
++
+ static const struct of_device_id nt36523_of_match[] = {
+ 	{
+ 		.compatible = "lenovo,j606f-boe-nt36523w",
+@@ -1254,6 +1701,10 @@ static const struct of_device_id nt36523_of_match[] = {
+ 		.compatible = "xiaomi,elish-csot-nt36523",
+ 		.data = &elish_csot_desc,
+ 	},
++	{
++		.compatible = "lenovo,tb710fu-nt36532",
++		.data = &tb710fu_nt36532_desc,
++	},
+ 	{},
+ };
+ MODULE_DEVICE_TABLE(of, nt36523_of_match);
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+index 9b9ae8ac3..6f1d1fb59 100644
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -1415,3 +1415,6 @@ config TOUCHSCREEN_HIMAX_HX83112B
+ 	  module will be called himax_hx83112b.
+ 
+ endif
++
++source "drivers/input/touchscreen/NT36XXX_SPI/Kconfig"
++
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+index bfd9de833..b60090908 100644
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -119,3 +119,4 @@ obj-$(CONFIG_TOUCHSCREEN_IQS5XX)	+= iqs5xx.o
+ obj-$(CONFIG_TOUCHSCREEN_IQS7211)	+= iqs7211.o
+ obj-$(CONFIG_TOUCHSCREEN_ZINITIX)	+= zinitix.o
+ obj-$(CONFIG_TOUCHSCREEN_HIMAX_HX83112B)	+= himax_hx83112b.o
++obj-$(CONFIG_TOUCHSCREEN_NT36XXX_SPI)	+= NT36XXX_SPI/
+diff --git a/drivers/net/wireless/ath/ath12k/ce.c b/drivers/net/wireless/ath/ath12k/ce.c
+index 67bbc6d8d..443a2d67a 100644
+--- a/drivers/net/wireless/ath/ath12k/ce.c
++++ b/drivers/net/wireless/ath/ath12k/ce.c
+@@ -133,7 +133,8 @@ static int ath12k_ce_completed_recv_next(struct ath12k_ce_pipe *pipe,
+ 		goto err;
+ 	}
+ 
+-	*nbytes = ath12k_hal_ce_dst_status_get_length(&ab->hal, desc);
++	*nbytes = ath12k_hal_ce_dst_status_get_length(&ab->hal, desc,
++						      NULL, NULL);
+ 
+ 	*skb = pipe->dest_ring->skb[sw_index];
+ 	pipe->dest_ring->skb[sw_index] = NULL;
+diff --git a/drivers/net/wireless/ath/ath12k/core.c b/drivers/net/wireless/ath/ath12k/core.c
+index 262a20453..7d2d7cdc4 100644
+--- a/drivers/net/wireless/ath/ath12k/core.c
++++ b/drivers/net/wireless/ath/ath12k/core.c
+@@ -218,10 +218,25 @@ int ath12k_core_resume(struct ath12k_base *ab)
+ }
+ EXPORT_SYMBOL(ath12k_core_resume);
+ 
++/* acm41 */ /* tb710fu: 强制 board-2.bin 条目名(见 patches/acm40_ath12k_boardname.py) */
++static char *tb710fu_board_name;
++module_param_named(board_name, tb710fu_board_name, charp, 0644);
++MODULE_PARM_DESC(board_name, "TB710FU: force the board-2.bin entry name");
++
+ static int __ath12k_core_create_board_name(struct ath12k_base *ab, char *name,
+ 					   size_t name_len, bool with_variant,
+ 					   bool bus_type_mode, bool with_default)
+ {
++	/* tb710fu: 若给定了 board_name 参数, 直接用它当条目名。
++	 * 注意 regdb 那次查找(bus_type_mode=true, 只要 "bus=pci")不能覆盖,
++	 * 否则会找不到 regdb(实测 failed to load regdb file:-2)。
++	 */
++	if (!bus_type_mode && tb710fu_board_name && tb710fu_board_name[0]) {
++		strscpy(name, tb710fu_board_name, name_len);
++		pr_info("ath12k: tb710fu board_name override: %s\n", name);
++		return 0;
++	}
++
+ 	/* strlen(',variant=') + strlen(ab->qmi.target.bdf_ext) */
+ 	char variant[9 + ATH12K_QMI_BDF_EXT_STR_LENGTH] = {};
+ 
+@@ -682,6 +697,11 @@ void ath12k_core_to_group_ref_put(struct ath12k_base *ab)
+ 
+ static void ath12k_core_stop(struct ath12k_base *ab)
+ {
++	/* acm47: 先停轮询, 免得设备已停还在动环 */
++	ab->tb710fu_ce_poll_on = false;
++	cancel_delayed_work_sync(&ab->tb710fu_ce_poll_work);
++	/* acm49: 不要在此处等 wq 销毁，wq 跨 ab 共享 */
++
+ 	ath12k_link_sta_rhash_tbl_destroy(ab);
+ 
+ 	ath12k_core_to_group_ref_put(ab);
+@@ -1132,6 +1152,103 @@ static int ath12k_core_mlo_setup(struct ath12k_hw_group *ag)
+ 	return ret;
+ }
+ 
++#define ATH12K_TB710FU_POLL_MS		20
++#define ATH12K_TB710FU_POLL_BUDGET	64
++
++/* acm48: 轮询节奏与预算改成运行时可调, 便于不重启就做二分 */
++static unsigned int tb710fu_poll_ms = ATH12K_TB710FU_POLL_MS;
++static unsigned int tb710fu_poll_budget = ATH12K_TB710FU_POLL_BUDGET;
++
++/* acm48: 统计。文件级静态 = 单 ab 假设(本机只有 1 个 radio 组) */
++static unsigned int tb710fu_poll_ticks;
++static unsigned int tb710fu_poll_rx;
++static unsigned int tb710fu_poll_max_gap_ms;
++static unsigned int tb710fu_poll_slow;
++static unsigned long long tb710fu_poll_last_ns;
++
++/* acm49: 轮询不能占用系统 events 工作队列 */
++static struct workqueue_struct *tb710fu_ce_wq;
++static unsigned int tb710fu_poll_max_ms;
++module_param_named(tb_poll_max_ms, tb710fu_poll_max_ms, uint, 0444);
++
++module_param_named(tb_poll_ms, tb710fu_poll_ms, uint, 0644);
++module_param_named(tb_poll_budget, tb710fu_poll_budget, uint, 0644);
++module_param_named(tb_poll_ticks, tb710fu_poll_ticks, uint, 0444);
++module_param_named(tb_poll_rx, tb710fu_poll_rx, uint, 0444);
++module_param_named(tb_poll_max_gap_ms, tb710fu_poll_max_gap_ms, uint, 0444);
++module_param_named(tb_poll_slow, tb710fu_poll_slow, uint, 0444);
++
++/* acm47: 代替永不触发的 MSI/NAPI —— 本机端点 MSI(X) 实测全 0 次,
++ * 于是 NAPI 永不运行, DP/REO 与 CE 环无人服务。这里在进程上下文里
++ * 直接调驱动的环服务函数把活干完。
++ */
++static void ath12k_tb710fu_ce_poll_work(struct work_struct *work)
++{
++	struct ath12k_base *ab = container_of(work, struct ath12k_base,
++					      tb710fu_ce_poll_work.work);
++	struct ath12k_dp *dp = ath12k_ab_to_dp(ab);
++	unsigned long long now, dt_start;
++	unsigned int gap_ms = 0;
++	unsigned int dt_ms;
++	unsigned int budget;
++	int i;
++
++	if (!ab->tb710fu_ce_poll_on)
++		return;
++
++	budget = tb710fu_poll_budget ? : ATH12K_TB710FU_POLL_BUDGET;
++
++	/* acm48: 统计轮询节奏, 用来判断 "work 没按时重排" 还是 "work 到了但没活" */
++	dt_start = ktime_get_ns();
++	now = dt_start;
++	if (tb710fu_poll_last_ns) {
++		gap_ms = div_u64(now - tb710fu_poll_last_ns, 1000000);
++		if (gap_ms > tb710fu_poll_max_gap_ms)
++			tb710fu_poll_max_gap_ms = gap_ms;
++		if (gap_ms > 100)
++			tb710fu_poll_slow++;
++	}
++	tb710fu_poll_last_ns = now;
++
++	/* acm48: 原本在 worker 上下文里调 ath12k_dp_service_srng ->
++	 * CE recv_cb -> ath12k_dp_rx_deliver_msdu -> ieee80211_rx_list(),
++	 * 而后者要求 softirq 上下文(WARN_ON_ONCE(softirq_count() == 0)),
++	 * 且 frame 因此绕过 netif_rx/softirq 正常路径。补上 BH 上下文。 */
++	for (i = 0; i < ATH12K_EXT_IRQ_GRP_NUM_MAX; i++) {
++		struct ath12k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[i];
++		int work_done;
++
++		if (!irq_grp->num_irq)
++			continue;
++		work_done = ath12k_dp_service_srng(dp, irq_grp, budget);
++		if (work_done > 0)
++			tb710fu_poll_rx += work_done;
++	}
++
++	ath12k_htc_poll_ce_all(ab);
++
++	dt_ms = div_u64(ktime_get_ns() - dt_start, 1000000);
++
++	tb710fu_poll_ticks++;
++	if (!(tb710fu_poll_ticks % 100)) {
++		ath12k_info(ab,
++			    "acm48: ticks=%u rx=%u max_gap=%ums slow=%u (ms=%u budget=%u)\n",
++			    tb710fu_poll_ticks, tb710fu_poll_rx,
++			    tb710fu_poll_max_gap_ms, tb710fu_poll_slow,
++			    tb710fu_poll_ms, budget);
++		tb710fu_poll_max_gap_ms = 0;
++		tb710fu_poll_slow = 0;
++	}
++
++	/* acm49: 本轮耗时，超过 50ms 就记一笔（日志里能看到是轮询自己卡住了） */
++	if (dt_ms > tb710fu_poll_max_ms)
++		tb710fu_poll_max_ms = dt_ms;
++
++	if (ab->tb710fu_ce_poll_on && tb710fu_ce_wq)
++		queue_delayed_work(tb710fu_ce_wq, &ab->tb710fu_ce_poll_work,
++				   msecs_to_jiffies(tb710fu_poll_ms ? : ATH12K_TB710FU_POLL_MS));
++}
++
+ static int ath12k_core_hw_group_start(struct ath12k_hw_group *ag)
+ {
+ 	struct ath12k_base *ab;
+@@ -1175,6 +1292,26 @@ static int ath12k_core_hw_group_start(struct ath12k_hw_group *ag)
+ 			goto err;
+ 	}
+ 
++	/* acm47: 设备已完全就绪(mac_register 成功), 现在才启动 CE/DP 轮询 */
++	for (i = 0; i < ag->num_devices; i++) {
++		ab = ag->ab[i];
++		if (!ab)
++			continue;
++
++		ab->tb710fu_ce_poll_on = true;
++		/* acm49: 首次创建专属工作队列（不再跟 systemd/udev 抢一个） */
++		if (!tb710fu_ce_wq)
++			tb710fu_ce_wq = alloc_workqueue("ath12k_tb_poll",
++							 WQ_MEM_RECLAIM | WQ_UNBOUND, 1);
++		if (!tb710fu_ce_wq) {
++			ath12k_err(ab, "acm49: cannot alloc workqueue, poll disabled\n");
++			continue;
++		}
++		queue_delayed_work(tb710fu_ce_wq, &ab->tb710fu_ce_poll_work,
++				   msecs_to_jiffies(ATH12K_TB710FU_POLL_MS));
++		ath12k_info(ab, "acm47: CE/DP polling started (MSI dead bypass)\n");
++	}
++
+ 	return 0;
+ 
+ err:
+@@ -2305,6 +2442,7 @@ struct ath12k_base *ath12k_core_alloc(struct device *dev, size_t priv_size,
+ 	INIT_WORK(&ab->rfkill_work, ath12k_rfkill_work);
+ 	INIT_WORK(&ab->dump_work, ath12k_coredump_upload);
+ 	INIT_WORK(&ab->update_11d_work, ath12k_update_11d);
++	INIT_DELAYED_WORK(&ab->tb710fu_ce_poll_work, ath12k_tb710fu_ce_poll_work);
+ 
+ 	timer_setup(&ab->rx_replenish_retry, ath12k_ce_rx_replenish_retry, 0);
+ 	init_completion(&ab->htc_suspend);
+@@ -2326,6 +2464,9 @@ struct ath12k_base *ath12k_core_alloc(struct device *dev, size_t priv_size,
+ 	 */
+ 	ab->device_id = 0;
+ 
++	/* TB710FU: HW crypto re-enabled (SW crypto path also broken) */
++	/* set_bit(ATH12K_FLAG_HW_CRYPTO_DISABLED, &ab->dev_flags); */
++
+ 	return ab;
+ 
+ err_free_wq_aux:
+diff --git a/drivers/net/wireless/ath/ath12k/core.h b/drivers/net/wireless/ath/ath12k/core.h
+index a98fc6e06..850aec23e 100644
+--- a/drivers/net/wireless/ath/ath12k/core.h
++++ b/drivers/net/wireless/ath/ath12k/core.h
+@@ -1059,6 +1059,9 @@ struct ath12k_base {
+ 	struct completion driver_recovery;
+ 	struct workqueue_struct *workqueue;
+ 	struct work_struct restart_work;
++	/* acm47: 端点 MSI 失效时的 CE/DP 周期轮询 */
++	struct delayed_work tb710fu_ce_poll_work;
++	bool tb710fu_ce_poll_on;
+ 	struct workqueue_struct *workqueue_aux;
+ 	struct work_struct reset_work;
+ 	atomic_t reset_count;
+diff --git a/drivers/net/wireless/ath/ath12k/dp_htt.c b/drivers/net/wireless/ath/ath12k/dp_htt.c
+index 68968f96b..14abdd54a 100644
+--- a/drivers/net/wireless/ath/ath12k/dp_htt.c
++++ b/drivers/net/wireless/ath/ath12k/dp_htt.c
+@@ -928,7 +928,7 @@ int ath12k_dp_tx_htt_h2t_ver_req_msg(struct ath12k_base *ab)
+ 		return ret;
+ 	}
+ 
+-	ret = wait_for_completion_timeout(&dp->htt_tgt_version_received,
++	ret = ath12k_htc_poll_wait_completion(ab, &dp->htt_tgt_version_received,
+ 					  HTT_TARGET_VERSION_TIMEOUT_HZ);
+ 	if (ret == 0) {
+ 		ath12k_warn(ab, "htt target version request timed out\n");
+diff --git a/drivers/net/wireless/ath/ath12k/hal.c b/drivers/net/wireless/ath/ath12k/hal.c
+index c0c3d2f04..707c392f2 100644
+--- a/drivers/net/wireless/ath/ath12k/hal.c
++++ b/drivers/net/wireless/ath/ath12k/hal.c
+@@ -303,9 +303,10 @@ void ath12k_hal_ce_dst_set_desc(struct ath12k_hal *hal,
+ }
+ 
+ u32 ath12k_hal_ce_dst_status_get_length(struct ath12k_hal *hal,
+-					struct hal_ce_srng_dst_status_desc *desc)
++					struct hal_ce_srng_dst_status_desc *desc,
++					u32 *raw_flags, u32 *raw_meta)
+ {
+-	return hal->ops->ce_dst_status_get_length(desc);
++	return hal->ops->ce_dst_status_get_length(desc, raw_flags, raw_meta);
+ }
+ 
+ void ath12k_hal_set_link_desc_addr(struct ath12k_hal *hal,
+diff --git a/drivers/net/wireless/ath/ath12k/hal.h b/drivers/net/wireless/ath/ath12k/hal.h
+index 3a874db79..f2a8da7cc 100644
+--- a/drivers/net/wireless/ath/ath12k/hal.h
++++ b/drivers/net/wireless/ath/ath12k/hal.h
+@@ -1403,7 +1403,8 @@ struct hal_ops {
+ 				u8 byte_swap_data);
+ 	void (*ce_dst_set_desc)(struct hal_ce_srng_dest_desc *desc,
+ 				dma_addr_t paddr);
+-	u32 (*ce_dst_status_get_length)(struct hal_ce_srng_dst_status_desc *desc);
++	u32 (*ce_dst_status_get_length)(struct hal_ce_srng_dst_status_desc *desc,
++					u32 *raw_flags, u32 *raw_meta);
+ 	void (*set_link_desc_addr)(struct hal_wbm_link_desc *desc, u32 cookie,
+ 				   dma_addr_t paddr,
+ 				   enum hal_rx_buf_return_buf_manager rbm);
+@@ -1525,7 +1526,8 @@ void ath12k_hal_setup_link_idle_list(struct ath12k_base *ab,
+ 				     u32 end_offset);
+ u32
+ ath12k_hal_ce_dst_status_get_length(struct ath12k_hal *hal,
+-				    struct hal_ce_srng_dst_status_desc *desc);
++				    struct hal_ce_srng_dst_status_desc *desc,
++				    u32 *raw_flags, u32 *raw_meta);
+ void ath12k_hal_tx_set_dscp_tid_map(struct ath12k_base *ab, int id);
+ void ath12k_hal_tx_configure_bank_register(struct ath12k_base *ab,
+ 					   u32 bank_config, u8 bank_id);
+diff --git a/drivers/net/wireless/ath/ath12k/htc.c b/drivers/net/wireless/ath/ath12k/htc.c
+index 92138caa2..46003c90c 100644
+--- a/drivers/net/wireless/ath/ath12k/htc.c
++++ b/drivers/net/wireless/ath/ath12k/htc.c
+@@ -555,6 +555,46 @@ int ath12k_htc_wait_target(struct ath12k_htc *htc)
+ 	return 0;
+ }
+ 
++/*
++ * acm45: TB710FU 的 WCN7850 端点 MSI 一次都不会送到主机, 于是 CE(拷贝引擎)环
++ * 没有任何中断去服务 —— HTC/WMI 的命令响应永远收不到(实测 `Service connect
++ * timeout` / 后续 WMI 全超时)。这里在"等待线程内部"轮询 CE 环(与
++ * ath12k_htc_wait_target() 的兜底写法同构), 不用独立线程, 避免抢跑/所有权问题。
++ */
++/* acm47: 轮询可能同时来自"等待线程"(acm45/46) 与"周期 work"(acm47),
++ * 并发处理同一个 CE completion 会重复完成/踩坏链表, 这里串行化。
++ * 两个调用者都在进程上下文, 用 mutex 安全。
++ */
++static DEFINE_MUTEX(ath12k_tb710fu_ce_lock);
++
++void ath12k_htc_poll_ce_all(struct ath12k_base *ab)
++{
++	int i;
++
++	mutex_lock(&ath12k_tb710fu_ce_lock);
++	for (i = 0; i < ab->hw_params->ce_count; i++)
++		ath12k_ce_per_engine_service(ab, i);
++	mutex_unlock(&ath12k_tb710fu_ce_lock);
++}
++EXPORT_SYMBOL(ath12k_htc_poll_ce_all);
++
++int ath12k_htc_poll_wait_completion(struct ath12k_base *ab,
++				    struct completion *done,
++				    unsigned long timeout)
++{
++	unsigned long deadline = jiffies + timeout;
++
++	do {
++		if (wait_for_completion_timeout(done, msecs_to_jiffies(5)))
++			return 1;
++
++		ath12k_htc_poll_ce_all(ab);
++	} while (time_before(jiffies, deadline));
++
++	return 0;
++}
++EXPORT_SYMBOL(ath12k_htc_poll_wait_completion);
++
+ int ath12k_htc_connect_service(struct ath12k_htc *htc,
+ 			       struct ath12k_htc_svc_conn_req *conn_req,
+ 			       struct ath12k_htc_svc_conn_resp *conn_resp)
+@@ -625,9 +665,9 @@ int ath12k_htc_connect_service(struct ath12k_htc *htc,
+ 		return status;
+ 	}
+ 
+-	/* wait for response */
+-	time_left = wait_for_completion_timeout(&htc->ctl_resp,
+-						ATH12K_HTC_CONN_SVC_TIMEOUT_HZ);
++	/* wait for response (acm45: 轮询 CE 环代替 MSI) */
++	time_left = ath12k_htc_poll_wait_completion(ab, &htc->ctl_resp,
++						    ATH12K_HTC_CONN_SVC_TIMEOUT_HZ);
+ 	if (!time_left) {
+ 		ath12k_err(ab, "Service connect timeout\n");
+ 		return -ETIMEDOUT;
+diff --git a/drivers/net/wireless/ath/ath12k/htc.h b/drivers/net/wireless/ath/ath12k/htc.h
+index 05b3e5935..35fe29644 100644
+--- a/drivers/net/wireless/ath/ath12k/htc.h
++++ b/drivers/net/wireless/ath/ath12k/htc.h
+@@ -304,6 +304,10 @@ struct ath12k_htc {
+ int ath12k_htc_init(struct ath12k_base *ab);
+ int ath12k_htc_wait_target(struct ath12k_htc *htc);
+ int ath12k_htc_start(struct ath12k_htc *htc);
++void ath12k_htc_poll_ce_all(struct ath12k_base *ab);
++int ath12k_htc_poll_wait_completion(struct ath12k_base *ab,
++				    struct completion *done,
++				    unsigned long timeout);
+ int ath12k_htc_connect_service(struct ath12k_htc *htc,
+ 			       struct ath12k_htc_svc_conn_req  *conn_req,
+ 			       struct ath12k_htc_svc_conn_resp *conn_resp);
+diff --git a/drivers/net/wireless/ath/ath12k/mac.c b/drivers/net/wireless/ath/ath12k/mac.c
+index 99bf5cf79..19cfe3c63 100644
+--- a/drivers/net/wireless/ath/ath12k/mac.c
++++ b/drivers/net/wireless/ath/ath12k/mac.c
+@@ -10,6 +10,54 @@
+ 
+ #include "mac.h"
+ #include "core.h"
++
++/* acm51: firmware STA power-save inactivity time (seconds), applied at every
++ * association. Writable so it can be swept with a wifi-service restart.
++ */
++static unsigned int tb710fu_ps_inact = 86400;
++module_param_named(tb_ps_inact, tb710fu_ps_inact, uint, 0644);
++
++/* acm52: how often to re-send "STA PS off" while associated (0 = only at assoc) */
++static unsigned int tb710fu_ps_reassert_ms;
++module_param_named(tb_ps_reassert_ms, tb710fu_ps_reassert_ms, uint, 0644);
++
++/* acm53: accept RX block-ack sessions when set (0 = the old TB refusal).
++ * Read on every ADDBA action, so it can be flipped at runtime.
++ */
++static unsigned int tb710fu_rx_ampdu;
++module_param_named(tb_rx_ampdu, tb710fu_rx_ampdu, uint, 0644);
++
++static struct workqueue_struct *tb710fu_ps_wq;
++static struct delayed_work tb710fu_ps_work;
++static struct ath12k *tb710fu_ps_ar;
++static u32 tb710fu_ps_vdev_id;
++static bool tb710fu_ps_on;
++static bool tb710fu_ps_work_inited;
++
++static void ath12k_tb710fu_ps_reassert(struct work_struct *work)
++{
++	struct ath12k *ar = tb710fu_ps_ar;
++	u32 vdev_id = tb710fu_ps_vdev_id;
++	unsigned int iv = tb710fu_ps_reassert_ms;
++
++	if (!tb710fu_ps_on || !ar || !iv)
++		return;
++
++	/* same knobs as the assoc-time block (acm51) */
++	ath12k_wmi_pdev_set_ps_mode(ar, vdev_id, WMI_STA_PS_MODE_DISABLED);
++	ath12k_wmi_set_sta_ps_param(ar, vdev_id, WMI_STA_PS_PARAM_INACTIVITY_TIME,
++				    tb710fu_ps_inact);
++	ath12k_wmi_set_sta_ps_param(ar, vdev_id, WMI_STA_PS_PARAM_PSPOLL_COUNT,
++				    WMI_STA_PS_PSPOLL_COUNT_NO_MAX);
++	ath12k_wmi_set_sta_ps_param(ar, vdev_id, WMI_STA_PS_PARAM_RX_WAKE_POLICY,
++				    WMI_STA_PS_RX_WAKE_POLICY_WAKE);
++	ath12k_wmi_set_sta_ps_param(ar, vdev_id, WMI_STA_PS_PARAM_TX_WAKE_THRESHOLD,
++				    WMI_STA_PS_TX_WAKE_THRESHOLD_ALWAYS);
++
++	if (tb710fu_ps_on && tb710fu_ps_wq)
++		queue_delayed_work(tb710fu_ps_wq, &tb710fu_ps_work,
++				   msecs_to_jiffies(iv));
++}
+ #include "debug.h"
+ #include "wmi.h"
+ #include "hw.h"
+@@ -4058,6 +4106,63 @@ static void ath12k_bss_assoc(struct ath12k *ar,
+ 				    arvif->vdev_id, ret);
+ 	}
+ 
++
++	/* TB710FU: ath12k_mac_op_config() is a stub on this wifi7 port, so
++	 * the host "iw power_save off" path (CONF_CHANGE_PS) never reaches
++	 * firmware and it keeps its default autonomous STA powersave. The AP
++	 * then buffers unicast frames which are only delivered in periodic
++	 * bursts (~2s), wrecking RX. This tablet is mains powered, force the
++	 * firmware STA power save mode OFF at every association.
++	 */
++	if (ahvif->vdev_type == WMI_VDEV_TYPE_STA &&
++	    ahvif->vdev_subtype == WMI_VDEV_SUBTYPE_NONE) {
++		ret = ath12k_wmi_pdev_set_ps_mode(ar, arvif->vdev_id,
++		                                  WMI_STA_PS_MODE_DISABLED);
++		if (ret)
++			ath12k_warn(ar->ab,
++				"tb710fu: failed to force STA ps disable vdev %d: %d\n",
++				arvif->vdev_id, ret);
++		else
++			ath12k_info(ar->ab,
++				"tb710fu: forced STA powersave DISABLED vdev %d\n",
++				arvif->vdev_id);
++
++		/* acm51: also pin the firmware's PS tunables. ath12k_mac_vif_setup_ps()
++		 * is dead code on this port, so the firmware runs its own defaults and
++		 * naps between our TX bursts -> downlink batches up until the next STA
++		 * transmission. tb_ps_inact is a writable module param (seconds).
++		 */
++		ath12k_wmi_set_sta_ps_param(ar, arvif->vdev_id,
++					    WMI_STA_PS_PARAM_INACTIVITY_TIME,
++					    tb710fu_ps_inact);
++		ath12k_wmi_set_sta_ps_param(ar, arvif->vdev_id,
++					    WMI_STA_PS_PARAM_PSPOLL_COUNT,
++					    WMI_STA_PS_PSPOLL_COUNT_NO_MAX);
++		ath12k_wmi_set_sta_ps_param(ar, arvif->vdev_id,
++					    WMI_STA_PS_PARAM_RX_WAKE_POLICY,
++					    WMI_STA_PS_RX_WAKE_POLICY_WAKE);
++		ath12k_wmi_set_sta_ps_param(ar, arvif->vdev_id,
++					    WMI_STA_PS_PARAM_TX_WAKE_THRESHOLD,
++					    WMI_STA_PS_TX_WAKE_THRESHOLD_ALWAYS);
++		ath12k_info(ar->ab,
++			    "tb710fu: acm51 STA PS params pinned (inact=%u s ps-poll=no-max rx-wake=wake tx-wake=always)\n",
++			    tb710fu_ps_inact);
++
++		/* acm52: keep asserting it while associated */
++		if (!tb710fu_ps_work_inited) {
++			INIT_DELAYED_WORK(&tb710fu_ps_work, ath12k_tb710fu_ps_reassert);
++			tb710fu_ps_work_inited = true;
++		}
++		if (!tb710fu_ps_wq)
++			tb710fu_ps_wq = alloc_workqueue("ath12k_tb_ps", 0, 0);
++		tb710fu_ps_ar = ar;
++		tb710fu_ps_vdev_id = arvif->vdev_id;
++		tb710fu_ps_on = true;
++		if (tb710fu_ps_wq && tb710fu_ps_reassert_ms)
++			queue_delayed_work(tb710fu_ps_wq, &tb710fu_ps_work,
++					   msecs_to_jiffies(tb710fu_ps_reassert_ms));
++	}
++
+ 	if (test_bit(WMI_TLV_SERVICE_11D_OFFLOAD, ar->ab->wmi_ab.svc_map) &&
+ 	    ahvif->vdev_type == WMI_VDEV_TYPE_STA &&
+ 	    ahvif->vdev_subtype == WMI_VDEV_SUBTYPE_NONE)
+@@ -4067,6 +4172,10 @@ static void ath12k_bss_assoc(struct ath12k *ar,
+ static void ath12k_bss_disassoc(struct ath12k *ar,
+ 				struct ath12k_link_vif *arvif)
+ {
++	/* acm52: stop re-asserting while not associated */
++	tb710fu_ps_on = false;
++	if (tb710fu_ps_wq)
++		cancel_delayed_work_sync(&tb710fu_ps_work);
+ 	int ret;
+ 
+ 	lockdep_assert_wiphy(ath12k_ar_to_hw(ar)->wiphy);
+@@ -11120,7 +11229,30 @@ static int ath12k_mac_ampdu_action(struct ieee80211_hw *hw,
+ 
+ 	switch (params->action) {
+ 	case IEEE80211_AMPDU_RX_START:
+-		ret = ath12k_dp_rx_ampdu_start(ar, params, link_id);
++		if (tb710fu_rx_ampdu) {
++			/* acm53: original driver path - set up the REO reorder
++			 * queue and let the AP aggregate.
++			 */
++			ret = ath12k_dp_rx_ampdu_start(ar, params, link_id);
++			if (ret)
++				ath12k_warn(ar->ab,
++					    "tb710fu: acm53 RX A-MPDU start tid %d failed %d\n",
++					    params->tid, ret);
++			else
++				ath12k_info(ar->ab,
++					    "tb710fu: acm53 accepted RX A-MPDU tid %d buf %d ssn %d\n",
++					    params->tid, params->buf_size, params->ssn);
++		} else {
++			/* TB710FU: aggregated RX through the REO reorder path is
++			 * broken with the MSI-poll workaround (immediate unicast
++			 * under a BA session never reaches the host; only
++			 * non-aggregated frames do).  Refuse every RX block-ack
++			 * session so the AP sends ordinary MPDUs.
++			 */
++			ath12k_dbg(ar->ab, ATH12K_DBG_MAC,
++				   "tb710fu: reject RX A-MPDU tid %d\n", params->tid);
++			ret = -EOPNOTSUPP;
++		}
+ 		break;
+ 	case IEEE80211_AMPDU_RX_STOP:
+ 		ret = ath12k_dp_rx_ampdu_stop(ar, params, link_id);
+diff --git a/drivers/net/wireless/ath/ath12k/qmi.c b/drivers/net/wireless/ath/ath12k/qmi.c
+index 280e50a1f..247c3e51a 100644
+--- a/drivers/net/wireless/ath/ath12k/qmi.c
++++ b/drivers/net/wireless/ath/ath12k/qmi.c
+@@ -3582,7 +3582,11 @@ static int ath12k_qmi_wlanfw_wlan_ini_send(struct ath12k_base *ab)
+ 	int ret;
+ 
+ 	req.enable_fwlog_valid = true;
+-	req.enable_fwlog = 1;
++	/* tb710fu: 固件默认 fwlog 会在扫描时用 WMI_DIAG 事件逐条洪泛 mgmt
++	 * 帧(>1500B/条), 灌死 WMI 命令处理并永久耗尽 HTC 信用, 导致扫描超时。
++	 * 关闭固件日志上送。
++	 */
++	req.enable_fwlog = 0;
+ 
+ 	ret = qmi_txn_init(&ab->qmi.handle, &txn,
+ 			   qmi_wlanfw_wlan_ini_resp_msg_v01_ei, &resp);
+diff --git a/drivers/net/wireless/ath/ath12k/wifi7/dp_rx.c b/drivers/net/wireless/ath/ath12k/wifi7/dp_rx.c
+index 95d87dd67..dbdf67a41 100644
+--- a/drivers/net/wireless/ath/ath12k/wifi7/dp_rx.c
++++ b/drivers/net/wireless/ath/ath12k/wifi7/dp_rx.c
+@@ -392,8 +392,14 @@ static int ath12k_wifi7_dp_rx_h_mpdu(struct ath12k_pdev_dp *dp_pdev,
+ 		rx_status->flag |= RX_FLAG_DECRYPTED | RX_FLAG_MMIC_STRIPPED;
+ 
+ 		if (rx_info->is_mcbc)
++			/* tb710fu: driver already removed the CCMP IV, so tell
++			 * mac80211 it is stripped and PN validated; otherwise the
++			 * SNAP header is misread as an IV -> RX_DROP_U_INVALID_8023
++			 */
+ 			rx_status->flag |= RX_FLAG_MIC_STRIPPED |
+-					   RX_FLAG_ICV_STRIPPED;
++					   RX_FLAG_ICV_STRIPPED |
++					   RX_FLAG_IV_STRIPPED |
++					   RX_FLAG_PN_VALIDATED;
+ 		else
+ 			rx_status->flag |= RX_FLAG_IV_STRIPPED |
+ 					   RX_FLAG_PN_VALIDATED;
+@@ -574,7 +580,11 @@ static int ath12k_wifi7_dp_rx_process_msdu(struct ath12k_pdev_dp *dp_pdev,
+ 	if (ret)
+ 		goto free_out;
+ 
+-	rx_info->rx_status->flag |= RX_FLAG_SKIP_MONITOR | RX_FLAG_DUP_VALIDATED;
++	/* tb710fu: do NOT claim HW dedup -- frames are delivered repeatedly
++	 * (REO path) here, so let mac80211 drop duplicates by sequence number
++	 * instead of blindly accepting every copy.
++	 */
++	rx_info->rx_status->flag |= RX_FLAG_SKIP_MONITOR;
+ 
+ 	return 0;
+ 
+diff --git a/drivers/net/wireless/ath/ath12k/wifi7/dp_tx.c b/drivers/net/wireless/ath/ath12k/wifi7/dp_tx.c
+index 587d58eec..a43573a8f 100644
+--- a/drivers/net/wireless/ath/ath12k/wifi7/dp_tx.c
++++ b/drivers/net/wireless/ath/ath12k/wifi7/dp_tx.c
+@@ -222,6 +222,19 @@ int ath12k_wifi7_dp_tx(struct ath12k_pdev_dp *dp_pdev, struct ath12k_link_vif *a
+ 	}
+ 
+ 	ti.encap_type = ath12k_dp_tx_get_encap_type(ab, skb);
++
++	/* tb710fu: hw-crypto tx encrypt_type
++	 * SW 加密路径会把 encrypt_type 写进 ext 描述符; 但硬件加密路径此前从未设置它,
++	 * 于是 HW 不加密, 而 mac80211 已置 Protected 位 -> 帧以明文+Protected 发出被
++	 * AP 丢弃(DHCP/ARP 全部不通)。这里为加密帧启用 ext 描述符并带上 cipher。
++	 */
++	if (!test_bit(ATH12K_FLAG_HW_CRYPTO_DISABLED, &ab->dev_flags) &&
++	    !(skb_cb->flags & ATH12K_SKB_HW_80211_ENCAP) &&
++	    (skb_cb->flags & ATH12K_SKB_CIPHER_SET)) {
++		ti.encrypt_type = ath12k_dp_tx_get_encrypt_type(skb_cb->cipher);
++		msdu_ext_desc = true;
++	}
++
+ 	ti.addr_search_flags = dp_link_vif->hal_addr_search_flags;
+ 	ti.search_type = dp_link_vif->search_type;
+ 	ti.type = HAL_TCL_DESC_TYPE_BUFFER;
+diff --git a/drivers/net/wireless/ath/ath12k/wifi7/hal.c b/drivers/net/wireless/ath/ath12k/wifi7/hal.c
+index a0a1902fb..7ea7efcd3 100644
+--- a/drivers/net/wireless/ath/ath12k/wifi7/hal.c
++++ b/drivers/net/wireless/ath/ath12k/wifi7/hal.c
+@@ -487,10 +487,16 @@ void ath12k_wifi7_hal_set_link_desc_addr(struct hal_wbm_link_desc *desc,
+ 			le32_encode_bits(cookie, BUFFER_ADDR_INFO1_SW_COOKIE);
+ }
+ 
+-u32 ath12k_wifi7_hal_ce_dst_status_get_length(struct hal_ce_srng_dst_status_desc *desc)
++u32 ath12k_wifi7_hal_ce_dst_status_get_length(struct hal_ce_srng_dst_status_desc *desc,
++					       u32 *raw_flags, u32 *raw_meta)
+ {
+ 	u32 len;
+ 
++	if (raw_flags)
++		*raw_flags = le32_to_cpu(READ_ONCE(desc->flags));
++	if (raw_meta)
++		*raw_meta = le32_to_cpu(READ_ONCE(desc->meta_info));
++
+ 	len = le32_get_bits(READ_ONCE(desc->flags), HAL_CE_DST_STATUS_DESC_FLAGS_LEN);
+ 	desc->flags &= ~cpu_to_le32(HAL_CE_DST_STATUS_DESC_FLAGS_LEN);
+ 
+diff --git a/drivers/net/wireless/ath/ath12k/wifi7/hal.h b/drivers/net/wireless/ath/ath12k/wifi7/hal.h
+index 3d9386198..15cd1b39a 100644
+--- a/drivers/net/wireless/ath/ath12k/wifi7/hal.h
++++ b/drivers/net/wireless/ath/ath12k/wifi7/hal.h
+@@ -548,7 +548,8 @@ ath12k_wifi7_hal_set_link_desc_addr(struct hal_wbm_link_desc *desc,
+ 				    u32 cookie, dma_addr_t paddr,
+ 				    enum hal_rx_buf_return_buf_manager rbm);
+ u32
+-ath12k_wifi7_hal_ce_dst_status_get_length(struct hal_ce_srng_dst_status_desc *desc);
++ath12k_wifi7_hal_ce_dst_status_get_length(struct hal_ce_srng_dst_status_desc *desc,
++					  u32 *raw_flags, u32 *raw_meta);
+ void
+ ath12k_wifi7_hal_setup_link_idle_list(struct ath12k_base *ab,
+ 				      struct hal_wbm_idle_scatter_list *sbuf,
+diff --git a/drivers/net/wireless/ath/ath12k/wmi.c b/drivers/net/wireless/ath/ath12k/wmi.c
+index d5160af60..5dbea7ba3 100644
+--- a/drivers/net/wireless/ath/ath12k/wmi.c
++++ b/drivers/net/wireless/ath/ath12k/wmi.c
+@@ -414,21 +414,33 @@ int ath12k_wmi_cmd_send(struct ath12k_wmi_pdev *wmi, struct sk_buff *skb,
+ 			u32 cmd_id)
+ {
+ 	struct ath12k_wmi_base *wmi_ab = wmi->wmi_ab;
++	struct ath12k_base *ab = wmi_ab->ab;
++	unsigned long deadline;
+ 	int ret = -EOPNOTSUPP;
+ 
+ 	might_sleep();
+ 
+-	wait_event_timeout(wmi_ab->tx_credits_wq, ({
++	/*
++	 * acm46: 端点 MSI 一次不响 -> HTC/WMI 的"发送配额"只会随 CE 环上的
++	 * credit report / 发送完成回调回来, 原来的 wait_event_timeout 不会被
++	 * 任何事件唤醒, 只会等到超时。这里改成"重试发送 + 轮询 CE + 短睡眠"。
++	 */
++	deadline = jiffies + WMI_SEND_TIMEOUT_HZ;
++	do {
+ 		ret = ath12k_wmi_cmd_send_nowait(wmi, skb, cmd_id);
+ 
+-		if (ret && test_bit(ATH12K_FLAG_CRASH_FLUSH, &wmi_ab->ab->dev_flags))
++		if (ret && test_bit(ATH12K_FLAG_CRASH_FLUSH, &ab->dev_flags))
+ 			ret = -ESHUTDOWN;
+ 
+-		(ret != -EAGAIN);
+-	}), WMI_SEND_TIMEOUT_HZ);
++		if (ret != -EAGAIN)
++			break;
++
++		ath12k_htc_poll_ce_all(ab);
++		usleep_range(1000, 2000);
++	} while (time_before(jiffies, deadline));
+ 
+ 	if (ret == -EAGAIN)
+-		ath12k_warn(wmi_ab->ab, "wmi command %d timeout\n", cmd_id);
++		ath12k_warn(ab, "wmi command %d timeout\n", cmd_id);
+ 
+ 	return ret;
+ }
+@@ -4368,7 +4380,7 @@ int ath12k_wmi_wait_for_service_ready(struct ath12k_base *ab)
+ {
+ 	unsigned long time_left;
+ 
+-	time_left = wait_for_completion_timeout(&ab->wmi_ab.service_ready,
++	time_left = ath12k_htc_poll_wait_completion(ab, &ab->wmi_ab.service_ready,
+ 						WMI_SERVICE_READY_TIMEOUT_HZ);
+ 	if (!time_left)
+ 		return -ETIMEDOUT;
+@@ -4380,7 +4392,7 @@ int ath12k_wmi_wait_for_unified_ready(struct ath12k_base *ab)
+ {
+ 	unsigned long time_left;
+ 
+-	time_left = wait_for_completion_timeout(&ab->wmi_ab.unified_ready,
++	time_left = ath12k_htc_poll_wait_completion(ab, &ab->wmi_ab.unified_ready,
+ 						WMI_SERVICE_READY_TIMEOUT_HZ);
+ 	if (!time_left)
+ 		return -ETIMEDOUT;
+diff --git a/drivers/phy/phy-snps-eusb2.c b/drivers/phy/phy-snps-eusb2.c
+index af4fa17ac..f97dda0df 100644
+--- a/drivers/phy/phy-snps-eusb2.c
++++ b/drivers/phy/phy-snps-eusb2.c
+@@ -452,6 +452,16 @@ static const struct snps_eusb2_phy_drvdata sm8550_snps_eusb2_phy = {
+ 	.num_clks       = ARRAY_SIZE(qcom_eusb2_hsphy_clock_names),
+ };
+ 
++static const char * const stock_eusb2_hsphy_clock_names[] = {
++	"ref_clk_src", "ref_clk",
++};
++
++static const struct snps_eusb2_phy_drvdata stock_snps_eusb2_phy = {
++	.phy_init	= qcom_snps_eusb2_hsphy_init,
++	.clk_names      = stock_eusb2_hsphy_clock_names,
++	.num_clks       = ARRAY_SIZE(stock_eusb2_hsphy_clock_names),
++};
++
+ static int snps_eusb2_hsphy_init(struct phy *p)
+ {
+ 	struct snps_eusb2_hsphy *phy = phy_get_drvdata(p);
+@@ -564,7 +574,9 @@ static int snps_eusb2_hsphy_probe(struct platform_device *pdev)
+ 
+ 	phy->ref_clk = NULL;
+ 	for (i = 0; i < phy->data->num_clks; ++i) {
+-		if (!strcmp(phy->clks[i].id, "ref")) {
++		if (!strcmp(phy->clks[i].id, "ref") ||
++			!strcmp(phy->clks[i].id, "ref_clk") ||
++			!strcmp(phy->clks[i].id, "ref_clk_src")) {
+ 			phy->ref_clk = phy->clks[i].clk;
+ 			break;
+ 		}
+@@ -610,6 +622,9 @@ static const struct of_device_id snps_eusb2_hsphy_of_match_table[] = {
+ 	{
+ 		.compatible = "qcom,sm8550-snps-eusb2-phy",
+ 		.data = &sm8550_snps_eusb2_phy,
++	}, {
++		.compatible = "qcom,usb-snps-eusb2-phy",
++		.data = &stock_snps_eusb2_phy,
+ 	}, {
+ 		.compatible = "samsung,exynos2200-eusb2-phy",
+ 		.data = &exynos2200_snps_eusb2_phy,
+diff --git a/drivers/power/sequencing/pwrseq-qcom-wcn.c b/drivers/power/sequencing/pwrseq-qcom-wcn.c
+index d41793e1f..f99513632 100644
+--- a/drivers/power/sequencing/pwrseq-qcom-wcn.c
++++ b/drivers/power/sequencing/pwrseq-qcom-wcn.c
+@@ -202,6 +202,18 @@ static int pwrseq_qcom_wcn_wlan_enable(struct pwrseq_device *pwrseq)
+ 	struct pwrseq_qcom_wcn_ctx *ctx = pwrseq_device_get_drvdata(pwrseq);
+ 
+ 	pwrseq_qcom_wcn_ensure_gpio_delay(ctx);
++	/*
++	 * TB710FU: XBL leaves the chip powered but with the 48 MHz reference
++	 * clock off; its ROM then sits in EDL and MHI never reaches READY.
++	 * This enable runs with PERST# asserted and before the host trains
++	 * the link, so give the ROM a real reset edge now that the clock is
++	 * up instead of writing 1 to an already-high line.
++	 */
++	gpiod_set_value_cansleep(ctx->wlan_gpio, 0);
++	/* 2 ms was not enough: the PMU bulk caps kept the die alive and it
++	 * stayed in the state the bootloader left (EDL, unclocked).  Hold the
++	 * enable low long enough for a full PMU power cycle. */
++	msleep(100);
+ 	gpiod_set_value_cansleep(ctx->wlan_gpio, 1);
+ 	ctx->last_gpio_enable_jf = jiffies;
+ 
+diff --git a/drivers/video/backlight/sy7758.c b/drivers/video/backlight/sy7758.c
+index 786589cb8..df18f66a8 100644
+--- a/drivers/video/backlight/sy7758.c
++++ b/drivers/video/backlight/sy7758.c
+@@ -17,6 +17,9 @@
+ #include <linux/bitfield.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/regulator/consumer.h>
++#include <linux/list.h>
++#include <linux/mutex.h>
++#include <linux/property.h>
+ 
+ #define DEFAULT_BRIGHTNESS	1024
+ #define MAX_BRIGHTNESS		4080
+@@ -69,33 +72,54 @@ struct sy7758 {
+ 	struct regmap *regmap;
+ 	struct gpio_desc *gpio;
+ 	struct backlight_device *bl;
++	bool follower;
++	struct list_head node;
+ };
+ 
++/*
++ * Some panels split their LED strings across two SY7758 chips (e.g. TB710FU
++ * uses an i2c6 master plus an i2c2 follower).  A single backlight device is
++ * registered by the non-follower instance; every brightness update is
++ * mirrored to all instances so both halves of the panel track together.
++ */
++static LIST_HEAD(sy7758_devices);
++static DEFINE_MUTEX(sy7758_devices_lock);
++static struct backlight_device *sy7758_primary_bl;
++
+ static const struct regmap_config sy7758_regmap_config = {
+ 	.reg_bits = 8,
+ 	.val_bits = 8,
+ 	.max_register = REG_MAX,
+ };
+ 
+-static int sy7758_backlight_update_status(struct backlight_device *backlight_dev)
++static int sy7758_write_brightness(struct sy7758 *sydev, unsigned int brightness)
+ {
+-	struct sy7758 *sydev = bl_get_data(backlight_dev);
+-	unsigned int brightness = backlight_get_brightness(backlight_dev);
+ 	int ret;
+ 
+ 	ret = regmap_write(sydev->regmap, REG_BRT_12BIT_L,
+-			   FIELD_PREP(MSK_BRT_12BIT_L,
+-				      brightness & 0xff));
++			   FIELD_PREP(MSK_BRT_12BIT_L, brightness & 0xff));
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = regmap_write(sydev->regmap, REG_BRT_12BIT_H,
+-			   FIELD_PREP(MSK_BRT_12BIT_H,
+-				      (brightness >> 8) & 0xf));
+-	if (ret)
+-		return ret;
++	return regmap_write(sydev->regmap, REG_BRT_12BIT_H,
++			    FIELD_PREP(MSK_BRT_12BIT_H, (brightness >> 8) & 0xf));
++}
+ 
+-	return 0;
++static int sy7758_backlight_update_status(struct backlight_device *backlight_dev)
++{
++	struct sy7758 *sydev;
++	unsigned int brightness = backlight_get_brightness(backlight_dev);
++	int ret = 0;
++
++	mutex_lock(&sy7758_devices_lock);
++	list_for_each_entry(sydev, &sy7758_devices, node) {
++		ret = sy7758_write_brightness(sydev, brightness);
++		if (ret)
++			break;
++	}
++	mutex_unlock(&sy7758_devices_lock);
++
++	return ret;
+ }
+ 
+ static const struct backlight_ops sy7758_backlight_ops = {
+@@ -125,8 +149,13 @@ static int sy7758_init(struct sy7758 *sydev)
+ 	if (ret)
+ 		return ret;
+ 
++	/* Keep the boost converter out of burst (power-save) mode.  In burst
++	 * mode the supply ripple at low LED currents makes a large, uneven
++	 * (darker) region appear on the panel; 0 is the chip's own power-on
++	 * default and gives a stable output across the whole brightness range.
++	 */
+ 	ret = regmap_write(sydev->regmap, REG_OTP_CFG5,
+-			   FIELD_PREP(MSK_CFG5_PS_MODE, 6) |
++			   FIELD_PREP(MSK_CFG5_PS_MODE, 0) |
+ 			   FIELD_PREP(MSK_CFG5_PWM_FREQ, 4));
+ 	if (ret)
+ 		return ret;
+@@ -184,8 +213,14 @@ static int sy7758_probe(struct i2c_client *client)
+ 
+ 	fsleep(100);
+ 
+-	/* Get enable GPIO and set to high */
+-	sydev->gpio = devm_gpiod_get(dev, "enable", GPIOD_OUT_HIGH);
++	/*
++	 * Optional: on boards where the panel's LED_EN line is already driven
++	 * high (by the bootloader, or wired to a rail) there is no GPIO to own.
++	 * Lenovo's own node for this chip carries no gpios at all - the display
++	 * driver owns the LED_EN there - so requiring one would just fail the
++	 * probe for no reason.
++	 */
++	sydev->gpio = devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_HIGH);
+ 	if (IS_ERR(sydev->gpio))
+ 		return dev_err_probe(dev, PTR_ERR(sydev->gpio),
+ 				     "failed to get enable GPIO\n");
+@@ -202,11 +237,27 @@ static int sy7758_probe(struct i2c_client *client)
+ 		return -ENODEV;
+ 	}
+ 
++	sydev->follower = device_property_read_bool(dev, "silergy,follower");
++
+ 	/* Initialize and set default brightness */
+ 	ret = sy7758_init(sydev);
+ 	if (ret)
+ 		return ret;
+ 
++	mutex_lock(&sy7758_devices_lock);
++	list_add_tail(&sydev->node, &sy7758_devices);
++	mutex_unlock(&sy7758_devices_lock);
++
++	/* A follower only mirrors the primary; it owns no backlight device. */
++	if (sydev->follower) {
++		mutex_lock(&sy7758_devices_lock);
++		if (sy7758_primary_bl)
++			sy7758_write_brightness(sydev,
++					backlight_get_brightness(sy7758_primary_bl));
++		mutex_unlock(&sy7758_devices_lock);
++		return 0;
++	}
++
+ 	props.type = BACKLIGHT_RAW;
+ 	props.max_brightness = MAX_BRIGHTNESS;
+ 	props.brightness = DEFAULT_BRIGHTNESS;
+@@ -219,6 +270,10 @@ static int sy7758_probe(struct i2c_client *client)
+ 		return dev_err_probe(dev, PTR_ERR(sydev->bl),
+ 				     "failed to register backlight device\n");
+ 
++	mutex_lock(&sy7758_devices_lock);
++	sy7758_primary_bl = sydev->bl;
++	mutex_unlock(&sy7758_devices_lock);
++
+ 	return backlight_update_status(sydev->bl);
+ }
+ 
+@@ -226,7 +281,14 @@ static void sy7758_remove(struct i2c_client *client)
+ {
+ 	struct sy7758 *sydev = i2c_get_clientdata(client);
+ 
+-	backlight_disable(sydev->bl);
++	mutex_lock(&sy7758_devices_lock);
++	list_del(&sydev->node);
++	if (sydev->bl && sy7758_primary_bl == sydev->bl)
++		sy7758_primary_bl = NULL;
++	mutex_unlock(&sy7758_devices_lock);
++
++	if (sydev->bl)
++		backlight_disable(sydev->bl);
+ }
+ 
+ static const struct i2c_device_id sy7758_ids[] = {
+diff --git a/drivers/video/fbdev/simplefb.c b/drivers/video/fbdev/simplefb.c
+index 60e5dcec2..ee53be415 100644
+--- a/drivers/video/fbdev/simplefb.c
++++ b/drivers/video/fbdev/simplefb.c
+@@ -529,8 +529,14 @@ static int simplefb_attach_genpds(struct simplefb_par *par,
+ }
+ #endif
+ 
++/* TB710FU: the boot ladder lives in init/main.c; see tb_mark() there. This
++ * board has no UART, and the panel is the only way to see anything. */
++extern void tb_mark(u64 base, u32 code);
++#define TB_FB_LINEAR_VA	((u64)__va(0xd5100000UL))
++
+ static int simplefb_probe(struct platform_device *pdev)
+ {
++	tb_mark(TB_FB_LINEAR_VA, 0x1048);
+ 	int ret;
+ 	struct simplefb_params params;
+ 	struct fb_info *info;
+@@ -638,6 +644,7 @@ static int simplefb_probe(struct platform_device *pdev)
+ 		goto error_genpds;
+ 	}
+ 	ret = register_framebuffer(info);
++	tb_mark(TB_FB_LINEAR_VA, 0x1049);
+ 	if (ret < 0) {
+ 		dev_err(&pdev->dev, "Unable to register simplefb: %d\n", ret);
+ 		goto error_genpds;
+diff --git a/init/main.c b/init/main.c
+index 2613d3f9b..03d0e0827 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -978,12 +978,1108 @@ static void __init print_kernel_cmdline(const char *cmdline)
+ 		pr_notice("%s%s\n", KERNEL_CMDLINE_PREFIX, cmdline);
+ }
+ 
++
++/*
++ * TB710FU bring-up: draw boot progress as coloured blocks on the ABL
++ * splash framebuffer (0xD5100000, 3200x2000, stride 3200, 32bpp), which
++ * the display pipeline keeps scanning after handoff.  Phys->virt via the
++ * linear map; dcache_clean_poc makes the writes visible to the display.
++ *
++ *   red   = start_kernel entered       magenta = sched_init()
++ *   green = setup_arch() done          cyan    = rest_init()
++ *   blue  = parse_early_param()        white   = (unknown code)
++ *   yellow= trap_init()
++ */
++#define TB_FB_PHYS	0xD5100000UL
++#define TB_FB_STRIDE	3200
++
++void tb_mark(u64 base, u32 code);
++static void tb_strip_draw(u64 base, unsigned int n);
++
++void tb_mark(u64 base, u32 code)
++{
++	static int idx;
++	unsigned *fb = (unsigned *)base;
++	unsigned col, *row;
++	unsigned long start, end;
++	int i, j;
++
++	/* Use the base this call was given, never a cached one: the early rungs pass
++	 * the identity address (TTBR0 still holds the idmap) and the later ones pass
++	 * the linear mapping. Caching the first value sent every later rung to
++	 * 0xd5100000 + offset, which in the init thread - where TTBR0 no longer
++	 * carries the identity map - is a user address with no page tables behind
++	 * it, and took the init thread down with a translation fault. */
++	if (idx >= 48)
++		return;
++
++	switch (code) {
++	case 0x1001: col = 0xffff0000; break;	/* red    */
++	case 0x1002: col = 0xff00ff00; break;	/* green  */
++	case 0x1003: col = 0xff0000ff; break;	/* blue   */
++	case 0x1004: col = 0xffffff00; break;	/* yellow */
++	case 0x1005: col = 0xffff00ff; break;	/* magenta*/
++	case 0x1006: col = 0xff00ffff; break;	/* cyan   */
++	case 0x1010: col = 0xffff8000; break;	/* orange */
++	case 0x1011: col = 0xff808000; break;
++	case 0x1012: col = 0xff008080; break;
++	case 0x1013: col = 0xff800080; break;
++	case 0x1014: col = 0xff808080; break;
++	case 0x1015: col = 0xffe0e0e0; break;
++	case 0x1020: col = 0xffffc0c0; break;	/* past cpu_uninstall_idmap */
++	case 0x1021: col = 0xff804000; break;
++	case 0x1022: col = 0xff008000; break;
++	case 0x1023: col = 0xff000080; break;
++	case 0x1024: col = 0xff800000; break;
++	case 0x1025: col = 0xffc0ffc0; break;	/* paging_init entered */
++	case 0x1026: col = 0xff4040ff; break;	/* map_mem done */
++	case 0x1027: col = 0xffffc000; break;	/* create_idmap done */
++	case 0x1028: col = 0xffffffff; break;	/* paging_init done */
++	case 0x1030: col = 0xff208020; break;	/* kernel_init entered */
++	case 0x1031: col = 0xff7f7fff; break;	/* do_initcalls done */
++	case 0x1032: col = 0xffff7f7f; break;	/* about to exec init */
++	case 0x1033: col = 0xff7f3f00; break;	/* panic() */
++	case 0x1040: col = 0xff808080; break;	/* initcall level 0 */
++	case 0x1041: col = 0xffc0c0c0; break;
++	case 0x1042: col = 0xffe0e0e0; break;
++	case 0x1043: col = 0xff8080ff; break;
++	case 0x1044: col = 0xff80ff80; break;
++	case 0x1045: col = 0xffff8080; break;
++	case 0x1046: col = 0xffffff80; break;
++	case 0x1047: col = 0xffff80ff; break;	/* initcall level 7 */
++	case 0x1048: col = 0xff00ff00; break;	/* simplefb_probe entered */
++	case 0x1049: col = 0xff0000ff; break;	/* register_framebuffer returned */
++	default:     col = 0xffffffff; break;	/* white  */
++	}
++
++	/* Eight to a row now that there are nineteen rungs. */
++	row = fb + (100 + 200 * (idx / 8)) * TB_FB_STRIDE + 100 + 180 * (idx % 8);
++	start = (unsigned long)row;
++	for (i = 0; i < 160; i++) {
++		unsigned *line = row + (unsigned long)i * TB_FB_STRIDE;
++
++		for (j = 0; j < 160; j++)
++			line[j] = col;
++	}
++	end = (unsigned long)(row + 160L * TB_FB_STRIDE);
++	dcache_clean_poc(start, end);
++	idx++;
++	tb_strip_draw(base, idx);
++}
++
+ asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protector
++/* ---------------------------------------------------------------------------
++ * TB710FU: an early console on the panel.
++ *
++ * There is no UART on this board, and fbcon cannot take the panel over until a
++ * framebuffer driver registers during do_initcalls(). So this draws the
++ * kernel's messages itself, with the kernel's own font, from the moment the
++ * linear map exists. CON_PRINTBUFFER makes register_console() replay the whole
++ * printk ring into it, so the boot's history appears on the panel at once.
++ *
++ * 8x16 glyphs at scale 4: 100 columns. The panel is split: the top 24 rows are
++ * the live log (and always show its tail), and the bottom 7 rows are a band
++ * holding the last lines of the *previous* boot, recovered from the black box.
++ * The screen can only show one thing, and the line that matters - where a boot
++ * stopped - is otherwise gone the moment the display dies.
++ */
++#define TB_CON_S	4			/* glyph scale: 100 cols x 31 rows, readable in a photo */
++#define TB_CON_W	3200			/* panel stride, pixels */
++#define TB_CON_COLS	(TB_CON_W / (8 * TB_CON_S))
++#define TB_CON_CELLH	(16 * TB_CON_S)
++#define TB_CON_LOG_ROWS	24
++#define TB_CON_BAND_ROWS 6
++#define TB_CON_ROWS	(TB_CON_LOG_ROWS + TB_CON_BAND_ROWS)
++#define TB_CON_RING	(TB_CON_LOG_ROWS * TB_CON_COLS)
++
++#include <linux/font.h>
++#include <asm/irq_regs.h>
++#include <asm/ptrace.h>
++#include <linux/platform_device.h>
++#include <linux/interconnect.h>
++#include <linux/workqueue.h>
++#include <linux/of.h>
++#include <linux/reboot.h>
++#include <linux/jiffies.h>
++extern void dcache_clean_poc(unsigned long start, unsigned long end);
++
++static char tb_con_ring[TB_CON_RING];
++static unsigned int tb_con_head;
++static unsigned int tb_hb_count;	/* heartbeats so far, shown by the band gauge */
++static const struct font_desc *tb_con_font;
++static char tb_bb_band[TB_CON_BAND_ROWS * TB_CON_COLS];
++
++/* ---------------------------------------------------------------------------
++ * TB710FU: the black box.
++ *
++ * Every console character is also appended here, to rings in plain RAM that are
++ * meant to survive the reset, and the next boot shows the tail of the previous
++ * one in the band along the bottom of the panel.  The screen is the only output
++ * this board has and it dies part-way into boot, so the tail - the part that
++ * says where a boot stopped - is otherwise unreadable and unphotographable.
++ *
++ * Two slots, because whether it survived must not be a guess: slot A sits above
++ * every buffer U-Boot fills (it reads a kernel, a 16 MiB device tree and an
++ * initrd into 0xA8000000..0xAD200000) but could be inside U-Boot's own heap;
++ * slot B sits inside the display reservation the bootloader keeps its splash in,
++ * past the 3200x2000x4 visible frame, and so out of U-Boot's way entirely.  Both
++ * are mirrored on every write and the band's first line reports each, so a
++ * single boot says which address is really left alone.  Slots must be reserved
++ * in the DTS without no-map: reserved, so the page allocator keeps off them,
++ * still mapped, so __va() reaches them.
++ */
++#define TB_BB_SLOTS	2
++#define TB_BB_SIZE	0x100000UL
++#define TB_BB_MAGIC	0x4c424254	/* "TBBL" */
++#define TB_BB_SHOW	4000		/* how far back to look for the band */
++
++static const u64 tb_bb_pa[TB_BB_SLOTS] = {
++	0xB0000000UL,
++	0xD6A00000UL,
++};
++
++struct tb_bb {
++	u32 magic;
++	u32 head;		/* bytes ever appended */
++	u32 boots;
++	u32 size;		/* capacity of data[] */
++	char data[];
++};
++
++static u32 tb_bb_seam[TB_BB_SLOTS];	/* where this boot's log starts in each */
++static u32 tb_bb_was_head[TB_BB_SLOTS];
++static u32 tb_bb_was_boots[TB_BB_SLOTS];
++static bool tb_bb_ok[TB_BB_SLOTS];	/* the previous boot's text was still there */
++
++static bool tb_bb_mute;		/* set while replaying the previous boot */
++
++static void tb_bb_put(const char *s, unsigned int n)
++{
++	int k;
++
++	if (tb_bb_mute)
++		return;
++
++	for (k = 0; k < TB_BB_SLOTS; k++) {
++		struct tb_bb *bb = (struct tb_bb *)__va(tb_bb_pa[k]);
++		u32 cap = TB_BB_SIZE - sizeof(*bb);
++		u32 before, written, off, first;
++		unsigned int i;
++
++		if (!bb->size)		/* never marked: leave it alone */
++			continue;
++
++		before = bb->head;
++		for (i = 0; i < n; i++) {
++			char c = s[i];
++
++			if (c == '\r' || !c)
++				continue;
++			bb->data[bb->head % cap] = c;
++			bb->head++;
++		}
++		written = bb->head - before;
++
++		/* Push it out as we go: the display reads this with the caches off, and
++		 * the next boot may not get a cache flush on the way down.  Only the
++		 * spans this call touched - the whole ring would make every printk pay
++		 * for a megabyte. */
++		dcache_clean_poc((unsigned long)bb, (unsigned long)(bb + 1));
++		off = before % cap;
++		if (written) {
++			first = written < cap - off ? written : cap - off;
++			dcache_clean_poc((unsigned long)(bb->data + off),
++					 (unsigned long)(bb->data + off + first));
++			if (written > first)
++				dcache_clean_poc((unsigned long)bb->data,
++						 (unsigned long)(bb->data + written - first));
++		}
++	}
++}
++
++/* First thing of the boot, before the console replays anything: keep what the
++ * previous boot left and mark the seam, so the band can find its tail. */
++static void __init tb_bb_boot_marker(void)
++{
++	int k;
++
++	for (k = 0; k < TB_BB_SLOTS; k++) {
++		struct tb_bb *bb = (struct tb_bb *)__va(tb_bb_pa[k]);
++
++		tb_bb_ok[k] = bb->magic == TB_BB_MAGIC &&
++			      bb->size == TB_BB_SIZE - sizeof(*bb);
++		if (!tb_bb_ok[k]) {
++			bb->magic = TB_BB_MAGIC;
++			bb->size = TB_BB_SIZE - sizeof(*bb);
++			bb->head = 0;
++			bb->boots = 0;
++		}
++		tb_bb_seam[k] = bb->head;
++		tb_bb_was_head[k] = bb->head;
++		bb->boots++;
++		tb_bb_was_boots[k] = bb->boots;
++		dcache_clean_poc((unsigned long)bb, (unsigned long)(bb + 1));
++	}
++
++	tb_bb_put("\n===== BOOT =====\n", 18);
++}
++
++/* The band's first row is drawn even when there is no previous text: that is
++ * what separates "the band does not draw" from "the ring is empty". */
++static void __init tb_bb_band_header(void)
++{
++	char buf[TB_CON_COLS + 1];
++	unsigned int i;
++	int n;
++
++	n = snprintf(buf, sizeof(buf), "BB A:%s h=%u b=%u   B:%s h=%u b=%u",
++		     tb_bb_ok[0] ? "PREV" : "fresh", tb_bb_was_head[0], tb_bb_was_boots[0],
++		     tb_bb_ok[1] ? "PREV" : "fresh", tb_bb_was_head[1], tb_bb_was_boots[1]);
++
++	for (i = 0; i < TB_CON_COLS; i++)
++		tb_bb_band[i] = (n > 0 && i < (unsigned int)n) ? buf[i] : ' ';
++}
++
++/* Copy the last few non-empty lines of the previous boot into the band, one row
++ * below the header. */
++static void __init tb_bb_load_prev(void)
++{
++	int pick = tb_bb_ok[0] ? 0 : (tb_bb_ok[1] ? 1 : -1);
++	const int rows = TB_CON_BAND_ROWS - 1;
++	struct tb_bb *bb;
++	u32 cap = TB_BB_SIZE - sizeof(struct tb_bb);
++	char ordered[(TB_CON_BAND_ROWS - 1) * TB_CON_COLS];
++	unsigned int i, n;
++	u32 start;
++	int line = 0, col = 0, r, c, first;
++
++	for (i = 0; i < sizeof(tb_bb_band); i++)
++		tb_bb_band[i] = ' ';
++
++	tb_bb_band_header();
++	if (pick < 0)
++		return;
++
++	bb = (struct tb_bb *)__va(tb_bb_pa[pick]);
++
++	start = tb_bb_seam[pick] > TB_BB_SHOW ? tb_bb_seam[pick] - TB_BB_SHOW : 0;
++	for (i = start; i <= tb_bb_seam[pick]; i++) {
++		char ch = i < tb_bb_seam[pick] ? bb->data[i % cap] : '\n';
++
++		if (ch == '\n') {
++			if (col)
++				line++;
++			col = 0;
++			continue;
++		}
++		if (ch < 32 || ch > 126)
++			ch = ' ';
++		if (col < TB_CON_COLS && line < rows)
++			ordered[(line % rows) * TB_CON_COLS + col] = ch;
++		col++;
++	}
++
++	/* Rows came out rotated (line k landed in slot k % rows); put them in order
++	 * and place them one row below the header. */
++	first = line > rows ? line - rows : 0;
++	for (r = 0; r < rows; r++) {
++		int src = (first + r) % rows;
++
++		for (c = 0; c < TB_CON_COLS; c++)
++			tb_bb_band[(r + 1) * TB_CON_COLS + c] = (first + r) < line ?
++				ordered[src * TB_CON_COLS + c] : ' ';
++	}
++}
++
++static unsigned int tb_boot_stamp(void);
++
++static void __init tb_bb_report(void)
++{
++	pr_info("TB BOOT STAMP %u\n", tb_boot_stamp());
++	pr_info("TB BLACK BOX: A=%s h=%u b=%u | B=%s h=%u b=%u\n",
++		tb_bb_ok[0] ? "PREVIOUS BOOT RECOVERED" : "fresh",
++		tb_bb_was_head[0], tb_bb_was_boots[0],
++		tb_bb_ok[1] ? "PREVIOUS BOOT RECOVERED" : "fresh",
++		tb_bb_was_head[1], tb_bb_was_boots[1]);
++}
++
++/* ---------------------------------------------------------------------------
++ * TB710FU: a reboot backstop, armed by /chosen/tb,autoreboot-seconds.
++ *
++ * The initramfs has a path for "reached user space but no USB channel"; this
++ * covers the case where user space is never reached at all - an initcall
++ * spinning, a panic looping without a reset - which otherwise leaves the board
++ * sitting there until someone power cycles it by hand.  With the timer armed the
++ * board comes back on its own, ABL's retry counter runs down, and the device
++ * lands in fastboot unattended.
++ *
++ * An early initcall, so it is armed before do_initcalls() runs; the timer
++ * subsystem and jiffies are up by then, and tick_init() has already warned if
++ * interrupts are still masked.
++ */
++static unsigned int tb_autoreboot_secs;
++static struct timer_list tb_autoreboot_timer;
++
++static void tb_autoreboot_fn(struct timer_list *t)
++{
++	pr_emerg("TB AUTO-REBOOT: %u s without reaching a usable console, booting again\n",
++		 tb_autoreboot_secs);
++	kernel_restart(NULL);
++}
++
++static int __init tb_autoreboot_arm(void)
++{
++	if (!of_chosen ||
++	    of_property_read_u32(of_chosen, "tb,autoreboot-seconds",
++				 &tb_autoreboot_secs) || !tb_autoreboot_secs)
++		return 0;
++
++	timer_setup(&tb_autoreboot_timer, tb_autoreboot_fn, 0);
++	mod_timer(&tb_autoreboot_timer,
++		  jiffies + (unsigned long)tb_autoreboot_secs * HZ);
++	pr_info("TB AUTO-REBOOT armed for %u s\n", tb_autoreboot_secs);
++
++	return 0;
++}
++/* DISABLED-BISECT: early_initcall(tb_autoreboot_arm); */
++
++/* ---------------------------------------------------------------------------
++ * TB710FU: keep the display's memory path voted.
++ *
++ * The panel dies at the end of boot while the RSC is enabled and survives while
++ * it is not, and the interconnect framework ties the two together: the NoC
++ * providers only probe once their clocks and the RPMh BCM voter are up (the
++ * RSC), and once the last of them has probed, icc_sync_state() zeroes every
++ * node's boot-time request and re-applies the aggregate.  With mdss disabled
++ * nothing holds a vote for the display's path, so that aggregate falls to zero,
++ * the NoC stops reserving the bandwidth the DPU's scanout keeps consuming, and
++ * the panel loses its stream - white then black, right as the probe sequence
++ * finishes.
++ *
++ * So be a consumer: the device tree node "tb,icc-keepalive" describes the
++ * display path, the framework resolves it and defers this probe until the
++ * providers are up, and we then hold the bandwidth forever.  That is what the
++ * DRM/DSI stack will do properly once it exists.  Voting late is fine:
++ * icc_set_bw() re-aggregates and re-programs the nodes, undoing the zeroing
++ * that icc_sync_state() already did.
++ */
++static int tb_icc_keepalive_held;	/* paths actually held */
++#define TB_ICC_KEEPALIVE_KBPS	2000000U	/* 3200x2000x4 at 60 Hz is ~1.5 GB/s */
++
++static int tb_icc_keepalive_probe(struct platform_device *pdev)
++{
++	struct icc_path *path;
++
++	path = devm_of_icc_get(&pdev->dev, "mdp0-mem");
++	if (IS_ERR(path))
++		return dev_err_probe(&pdev->dev, PTR_ERR(path),
++				     "display path not available yet\n");
++
++	if (icc_set_bw(path, TB_ICC_KEEPALIVE_KBPS, TB_ICC_KEEPALIVE_KBPS))
++		return -EIO;
++
++	dev_info(&pdev->dev, "holding %u KB/s on the display's memory path\n",
++		 TB_ICC_KEEPALIVE_KBPS);
++	tb_icc_keepalive_held++;
++
++	return 0;
++}
++
++static const struct of_device_id tb_icc_keepalive_of_match[] = {
++	{ .compatible = "tb,icc-keepalive" },
++	{ }
++};
++
++static struct platform_driver tb_icc_keepalive_driver = {
++	.probe = tb_icc_keepalive_probe,
++	.driver = {
++		.name = "tb-icc-keepalive",
++		.of_match_table = tb_icc_keepalive_of_match,
++	},
++};
++
++static int __init tb_icc_keepalive_init(void)
++{
++	return platform_driver_register(&tb_icc_keepalive_driver);
++}
++/* DISABLED-BISECT: late_initcall(tb_icc_keepalive_init); */
++
++/* One line at the end of the initcall sequence saying whether the vote is really
++ * held.  It lands late in the log, which is the part the panel's band shows on
++ * the next boot, so whether this worked is visible in one photo rather than
++ * needing the whole log. */
++static int __init tb_icc_keepalive_report(void)
++{
++	pr_info("TB ICC keepalive: %s (%d path(s) held)\n",
++		tb_icc_keepalive_held ? "vote is HELD" : "NO VOTE - the driver never probed",
++		tb_icc_keepalive_held);
++
++	return 0;
++}
++/* DISABLED-BISECT: late_initcall_sync(tb_icc_keepalive_report); */
++
++
++/* ---------------------------------------------------------------------------
++ * TB710FU: a heartbeat.
++ *
++ * The panel can die the moment the kernel takes over, which leaves "the screen
++ * is black" saying nothing about whether the kernel died or is running with a
++ * dead display.  A line every two seconds fixes that: the tail of the log - and
++ * therefore the band on the next boot, and the black box - always says the
++ * second the kernel was last alive.  The initramfs adds its own lines
++ * ("TBINIT:", "alive t=Ns udc=[...]") once user space is reached.
++ */
++static void tb_gauge_draw(void);	/* defined below */
++#define TB_BB_DUMP_LINES	24
++static void tb_bb_dump_prev(int want);	/* defined below */
++static void tb_bb_dump_head(int want);
++static void tb_bb_dump_keys(int want);
++static void tb_initcall_bar(unsigned long fn);	/* defined below */
++#define TB_HEARTBEAT_SECS	10
++
++static void tb_heartbeat_fn(struct timer_list *t)
++{
++	struct pt_regs *regs = get_irq_regs();
++	unsigned long pc = regs ? instruction_pointer(regs) : 0;
++
++	tb_hb_count++;
++	/* throttled: the old 5s/28-line key dumps filled the ring buffer in
++	 * under a minute and rolled the TBDUMP snapshots before the console
++	 * could pull them */
++	if (tb_hb_count % 6 == 0)
++		tb_bb_dump_keys(28);
++	else if (tb_hb_count % 12 == 7)
++		tb_bb_dump_prev(10);
++	pr_info("TB ALIVE t=%us hb=%u pc=%px\n",
++		(unsigned int)((jiffies - INITIAL_JIFFIES) / HZ), tb_hb_count,
++		(void *)pc);
++	tb_gauge_draw();
++	tb_initcall_bar(pc);
++	mod_timer(t, jiffies + TB_HEARTBEAT_SECS * HZ);
++}
++
++static struct timer_list tb_heartbeat_timer;
++
++static int __init tb_heartbeat_init(void)
++{
++	timer_setup(&tb_heartbeat_timer, tb_heartbeat_fn, 0);
++	mod_timer(&tb_heartbeat_timer, jiffies + TB_HEARTBEAT_SECS * HZ);
++
++	return 0;
++}
++early_initcall(tb_heartbeat_init);
++
++/* ---------------------------------------------------------------------------
++ * TB710FU: a liveness meter that does not depend on the console.
++ *
++ * When the panel is black there is no way to tell "the kernel died" from "the
++ * kernel is running and the display is gone", and the black box needs a warm
++ * reset to survive.  So the heartbeat draws one green square per tick directly
++ * into a fixed row of the framebuffer: no printk, no font, no ring state, so
++ * nothing the console does can break it.  A photo of that row gives the number
++ * of 2-second ticks the kernel lived, with a red square marking the count.
++ */
++#define TB_GAUGE_Y	(TB_CON_LOG_ROWS * TB_CON_CELLH)	/* first band row */
++#define TB_GAUGE_BOX	28
++#define TB_GAUGE_STEP	34
++
++static void tb_gauge_draw(void)
++{
++	volatile u32 *fb = (volatile u32 *)__va(TB_FB_PHYS);
++	unsigned int i, n = tb_hb_count;
++	unsigned long start, end;
++
++	if (n > 90)
++		n = 90;
++
++	for (i = 0; i <= n; i++) {
++		volatile u32 *p = fb + (unsigned long)(TB_GAUGE_Y + 18) * TB_CON_W +
++				  120 + i * TB_GAUGE_STEP;
++		int r, c;
++
++		for (r = 0; r < TB_GAUGE_BOX; r++)
++			for (c = 0; c < TB_GAUGE_BOX; c++)
++				p[(unsigned long)r * TB_CON_W + c] =
++					(i < n) ? 0xff00ff00 : 0xffff0000;
++	}
++
++	start = (unsigned long)(fb + (unsigned long)(TB_GAUGE_Y + 18) * TB_CON_W + 120);
++	end = start + (unsigned long)(TB_GAUGE_BOX + 2) * TB_CON_W * 4;
++	dcache_clean_poc(start, end);
++}
++
++/* ---------------------------------------------------------------------------
++ * TB710FU: instruments that survive a broken console.
++ *
++ * do not survive a panel console that repaints the same rows, and a stale screen
++ * looks exactly like a fresh one.  Two additions:
++ *
++ *  - the bottom 16-pixel strip of the panel (which the console never paints - it
++ *    stops at row 30) carries one square per tb_mark() call, newest in red, so a
++ *    photo of the bottom edge says how many ladder rungs the kernel reached;
++ *  - the band gauge carries a number derived from CNTPCT, the arch timer's
++ *    free-running counter, which keeps counting across resets: identical numbers
++ *    in two photos mean the screen is stale, different numbers mean it is live.
++ */
++#define TB_STRIP_Y	1952			/* below the console's 30 rows */
++#define TB_STRIP_BOX	32
++#define TB_STRIP_STEP	36
++
++static void tb_strip_draw(u64 base, unsigned int n)
++{
++	/* Same base as the rung that triggered this call: the early rungs run
++	 * before paging_init() exists and must go through the identity mapping. */
++	volatile u32 *fb = (volatile u32 *)base;
++	unsigned int i;
++	unsigned long start, end;
++
++	if (n > 99)
++		n = 99;
++
++	/* Clear our own row first: an earlier boot that got further would otherwise
++	 * leave extra squares behind and inflate the count a photo shows. */
++	for (i = 0; i < TB_STRIP_BOX; i++) {
++		volatile u32 *row = fb + (unsigned long)(TB_STRIP_Y + i) * TB_CON_W;
++		int c;
++
++		for (c = 0; c < TB_CON_W; c++)
++			row[c] = 0xff000000;
++	}
++
++	for (i = 0; i <= n; i++) {
++		volatile u32 *p = fb + (unsigned long)TB_STRIP_Y * TB_CON_W + 2 + i * TB_STRIP_STEP;
++		int r, c;
++
++		for (r = 0; r < TB_STRIP_BOX; r++)
++			for (c = 0; c < TB_STRIP_BOX; c++)
++				p[(unsigned long)r * TB_CON_W + c] = (i < n) ? 0xff00ff00 : 0xffff0000;
++	}
++
++	start = (unsigned long)(fb + (unsigned long)TB_STRIP_Y * TB_CON_W);
++	end = start + (unsigned long)TB_STRIP_BOX * TB_CON_W * 4;
++	dcache_clean_poc(start, end);
++}
++
++static unsigned int tb_boot_stamp(void)
++{
++	u64 cnt;
++
++	asm volatile("mrs %0, cntpct_el0" : "=r"(cnt));
++	if (!cnt)				/* no arch timer yet: fall back */
++		cnt = jiffies;
++
++	return (unsigned int)((cnt / 1000) % 1000000);
++}
++
++
++/* ---------------------------------------------------------------------------
++ * TB710FU: show the /memory the kernel was actually handed.
++ *
++ * The kernel stops inside paging_init(), which builds the linear map from the
++ * device tree's /memory.  U-Boot's log says RAM TOT e649c000 (~3.86 GB) while the
++ * board dts declares 0x80000000 + 8 GiB; memory that large reaches past the real
++ * RAM, and memblock handing out page tables from the hole would be a synchronous
++ * external abort exactly there.  This draws the tree's answer, so a photo settles
++ * it: green squares = 256 MB each of total RAM, red squares to the right = one
++ * per /memory bank.
++ */
++#define TB_MEMBAR_Y	(uint)(TB_CON_ROWS * TB_CON_CELLH + 32)
++
++void tb_mem_bar(u64 base, u64 bytes, unsigned int banks)
++{
++	/* Same base as the rung this is called from: it runs before
++	 * paging_init() exists and must go through the identity map. */
++	volatile u32 *fb = (volatile u32 *)base;
++	unsigned long n = (unsigned long)(bytes >> 28);	/* 256 MB units */
++	unsigned int i;
++	unsigned long start, end;
++
++	if (n > 40)
++		n = 40;
++	if (banks > 8)
++		banks = 8;
++
++	/* Same reasoning as the strip: clear our own row so the count is this boot's. */
++	for (i = 0; i < TB_STRIP_BOX; i++) {
++		volatile u32 *row = fb + (unsigned long)(TB_MEMBAR_Y + i) * TB_CON_W;
++		int c;
++
++		for (c = 0; c < TB_CON_W; c++)
++			row[c] = 0xff000000;
++	}
++
++	for (i = 0; i < n; i++) {
++		volatile u32 *p = fb + (unsigned long)TB_MEMBAR_Y * TB_CON_W + 2 + i * TB_STRIP_STEP;
++		int r, c;
++
++		for (r = 0; r < TB_STRIP_BOX; r++)
++			for (c = 0; c < TB_STRIP_BOX; c++)
++				p[(unsigned long)r * TB_CON_W + c] = 0xff00ff00;
++	}
++
++	for (i = 0; i < banks; i++) {
++		volatile u32 *p = fb + (unsigned long)TB_MEMBAR_Y * TB_CON_W + 1600 + i * TB_STRIP_STEP;
++		int r, c;
++
++		for (r = 0; r < TB_STRIP_BOX; r++)
++			for (c = 0; c < TB_STRIP_BOX; c++)
++				p[(unsigned long)r * TB_CON_W + c] = 0xffff0000;
++	}
++
++	start = (unsigned long)(fb + (unsigned long)TB_MEMBAR_Y * TB_CON_W);
++	end = start + (unsigned long)TB_STRIP_BOX * TB_CON_W * 4;
++	dcache_clean_poc(start, end);
++}
++
++
++/* ---------------------------------------------------------------------------
++ * TB710FU: name the initcall that never returns.
++ *
++ * The rung counter says the kernel reaches the end of the initcall sequence -
++ * where the old logs stopped too (the deferred probe report).  The console's
++ * character count cannot refine that, because this kernel's printk delivers
++ * console output from a kthread: a kernel that never goes idle leaves the console
++ * showing only the banner.
++ *
++ * So write the address of the last do_one_initcall() target into the panel as 32
++ * bit-squares (bit 0 leftmost, green = 1, black = 0).  Read it off a photo, look
++ * it up in System.map, and the function is named.
++ */
++#define TB_BITS_Y	1920
++#define TB_BITS_BOX	32
++#define TB_BITS_GROUP	6
++#define TB_BITS_CELL	520
++#define TB_BITS_UNIT	32
++
++/* Six bars, one per hex digit of the address's low 24 bits: each starts at a fixed
++ * cell and its length is (digit + 1) * 32 px (32..512), so reading six lengths gives six hex
++ * digits.  Counting bit-squares off a phone photo does not work; comparing bar
++ * lengths does.  Look the value up in System.map. */
++static void tb_initcall_bar(unsigned long fn)
++{
++	volatile u32 *fb = (volatile u32 *)__va(TB_FB_PHYS);
++	unsigned long start, end;
++	int g, i, r, c;
++
++	for (i = 0; i < TB_BITS_BOX; i++) {
++		volatile u32 *row = fb + (unsigned long)(TB_BITS_Y + i) * TB_CON_W;
++		int k;
++
++		for (k = 0; k < TB_CON_W; k++)
++			row[k] = 0xff000000;
++	}
++
++	for (g = 0; g < TB_BITS_GROUP; g++) {
++		unsigned long digit = (fn >> (g * 4)) & 0xf;
++		unsigned long len = (digit + 1) * TB_BITS_UNIT;
++		volatile u32 *p = fb + (unsigned long)TB_BITS_Y * TB_CON_W +
++				  20 + g * TB_BITS_CELL;
++
++		for (r = 0; r < TB_BITS_BOX; r++)
++			for (c = 0; c < (int)len; c++)
++				p[(unsigned long)r * TB_CON_W + c] = 0xff00ff00;
++	}
++
++	start = (unsigned long)(fb + (unsigned long)TB_BITS_Y * TB_CON_W);
++	end = start + (unsigned long)TB_BITS_BOX * TB_CON_W * 4;
++	dcache_clean_poc(start, end);
++}
++
++
++/* Print the previous boot's tail as ordinary log lines: slot A survives this
++ * device's own resets, and five band rows are nowhere near enough to see why a
++ * boot ended.  Muted from the box so the dump cannot overwrite what it reads. */
++
++static void tb_bb_dump_prev(int want)
++{
++	/* Slot 0, unconditionally: this reads *this* boot's own opening lines, which
++	 * the mirror has been writing since the first console write - no need for any
++	 * of it to have survived a reset (tb_bb_ok is about the previous boot). */
++	int pick = 0;
++	struct tb_bb *bb;
++	u32 cap = TB_BB_SIZE - sizeof(struct tb_bb);
++	u32 start;
++	char line[TB_CON_COLS + 1];
++	unsigned int col = 0, i;
++	int shown = 0, lines = 0;
++
++	if (pick < 0 || !tb_bb_seam[pick]) {
++		pr_info("TB PREV: no black box content\n");
++		return;
++	}
++
++	bb = (struct tb_bb *)__va(tb_bb_pa[pick]);
++	start = tb_bb_seam[pick] > 8000 ? tb_bb_seam[pick] - 8000 : 0;
++
++	/* count the lines in the window first, so we can print only the last ones */
++	for (i = start; i < tb_bb_seam[pick]; i++)
++		if (bb->data[i % cap] == '\n')
++			lines++;
++
++	tb_bb_mute = true;
++	pr_info("=== PREVIOUS BOOT (black box, %d lines, showing last %d) ===\n",
++		lines, want);
++	for (i = start; i <= tb_bb_seam[pick]; i++) {
++		char ch = i < tb_bb_seam[pick] ? bb->data[i % cap] : '\n';
++
++		if (ch != '\n') {
++			if (col < TB_CON_COLS)
++				line[col] = (ch >= 32 && ch < 127) ? ch : ' ';
++			col++;
++			continue;
++		}
++		if (col) {
++			line[col < TB_CON_COLS ? col : TB_CON_COLS] = 0;
++			if (lines - shown <= want) {
++				pr_info("PREV| %s\n", line);
++				shown++;
++			}
++		}
++		col = 0;
++	}
++	pr_info("=== END PREVIOUS BOOT ===\n");
++	tb_bb_mute = false;
++}
++
++
++/* Print this boot's own opening lines from the black box, which has been
++ * recording since the first console write.  The early boot messages are what
++ * scrolls away first and they are the ones usually wanted (driver probe results,
++ * for instance the DWC3/USB outcome) - re-print them so a photo taken at any time
++ * still shows them. */
++static void tb_bb_dump_head(int want)
++{
++	/* This boot's own mirror: no cross-reset condition applies here. */
++	int pick = 0;
++	struct tb_bb *bb;
++	u32 cap = TB_BB_SIZE - sizeof(struct tb_bb);
++	u32 end;
++	char line[TB_CON_COLS + 1];
++	unsigned int col = 0, i;
++	int shown = 0;
++
++	bb = (struct tb_bb *)__va(tb_bb_pa[pick]);
++	if (!bb->head)			/* nothing mirrored yet */
++		return;
++
++	end = tb_bb_seam[pick] + 6000;
++	if (end > bb->head)
++		end = bb->head;
++
++	tb_bb_mute = true;
++	pr_info("=== THIS BOOT, FIRST %d LINES ===\n", want);
++	for (i = tb_bb_seam[pick]; i <= end && shown < want; i++) {
++		char ch = i < end ? bb->data[i % cap] : '\n';
++
++		if (ch != '\n') {
++			if (col < TB_CON_COLS)
++				line[col] = (ch >= 32 && ch < 127) ? ch : ' ';
++			col++;
++			continue;
++		}
++		if (col) {
++			line[col < TB_CON_COLS ? col : TB_CON_COLS] = 0;
++			pr_info("HEAD| %s\n", line);
++			shown++;
++		}
++		col = 0;
++	}
++	pr_info("=== END ===\n");
++	tb_bb_mute = false;
++}
++
++
++/* Re-print only the interesting lines from this boot's mirror: the machine model
++ * (which device tree did the kernel actually receive?) and the USB chain.  Muted
++ * from the box. */
++static const char *const tb_key_words[] = {
++	"Machine model", "USB", "usb", "dwc3", "udc", "phy", "PHY",
++	"Unable", "panic", "Call trace", "cdev", "gadget",
++};
++
++static bool tb_bb_line_matches(const char *line)
++{
++	int i;
++
++	/* fw_devlink's cycle reports match "phy"/"usb" but say nothing about the
++	 * probe results we are after. */
++	if (strstr(line, "Fixed dependency cycle"))
++		return false;
++
++	for (i = 0; i < ARRAY_SIZE(tb_key_words); i++)
++		if (strstr(line, tb_key_words[i]))
++			return true;
++
++	return false;
++}
++
++static void tb_bb_dump_keys(int want)
++{
++	struct tb_bb *bb = (struct tb_bb *)__va(tb_bb_pa[0]);
++	u32 cap = TB_BB_SIZE - sizeof(struct tb_bb);
++	u32 end;
++	char line[TB_CON_COLS + 1];
++	unsigned int col = 0, i;
++	int shown = 0, seen = 0;
++
++	end = bb->head;
++	if (!end)
++		return;
++
++	/* pass 1: how many lines match, so we can print only the last `want` */
++	{
++		int total = 0;
++
++		col = 0;
++		for (i = tb_bb_seam[0]; i <= end; i++) {
++			char ch = i < end ? bb->data[i % cap] : '\n';
++
++			if (ch != '\n') {
++				if (col < TB_CON_COLS)
++					line[col] = (ch >= 32 && ch < 127) ? ch : ' ';
++				col++;
++				continue;
++			}
++			if (col) {
++				line[col < TB_CON_COLS ? col : TB_CON_COLS] = 0;
++				if (tb_bb_line_matches(line))
++					total++;
++			}
++			col = 0;
++		}
++
++		tb_bb_mute = true;
++		pr_info("=== KEY LINES (last %d of %d) ===\n", want, total);
++		col = 0;
++		for (i = tb_bb_seam[0]; i <= end; i++) {
++			char ch = i < end ? bb->data[i % cap] : '\n';
++
++			if (ch != '\n') {
++				if (col < TB_CON_COLS)
++					line[col] = (ch >= 32 && ch < 127) ? ch : ' ';
++				col++;
++				continue;
++			}
++			if (col) {
++				line[col < TB_CON_COLS ? col : TB_CON_COLS] = 0;
++				if (tb_bb_line_matches(line)) {
++					/* `seen` counts matches encountered, not ones printed:
++					 * with total-shown the first match would be skipped while
++					 * shown stayed 0, so nothing was ever printed. */
++					if (total - seen <= want) {
++						pr_info("KEY| %s\n", line);
++						shown++;
++					}
++					seen++;
++				}
++			}
++			col = 0;
++		}
++		pr_info("=== END KEY ===\n");
++		tb_bb_mute = false;
++	}
++}
++
++static void tb_con_cell(volatile u32 *fb, int row, int col, unsigned char ch, u32 fg)
++{
++	const unsigned char *g;
++	volatile u32 *base;
++	int r, c, dy, dx;
++
++	if (!tb_con_font)
++		return;
++	g = font_data_glyph_buf(tb_con_font->data, tb_con_font->width,
++				tb_con_font->height, ch);
++	if (!g)
++		return;
++
++	base = fb + (unsigned long)(row * TB_CON_CELLH) * TB_CON_W + col * 8 * TB_CON_S;
++	for (r = 0; r < 16; r++) {
++		unsigned char bits = g[r];
++
++		for (c = 0; c < 8; c++) {
++			u32 v = (bits & (0x80 >> c)) ? fg : 0xff000000;
++			volatile u32 *p = base + (unsigned long)(r * TB_CON_S) * TB_CON_W + c * TB_CON_S;
++
++			for (dy = 0; dy < TB_CON_S; dy++)
++				for (dx = 0; dx < TB_CON_S; dx++)
++					p[(unsigned long)dy * TB_CON_W + dx] = v;
++		}
++	}
++}
++
++static void tb_con_draw(void)
++{
++	volatile u32 *fb = (volatile u32 *)__va(TB_FB_PHYS);
++	unsigned int n = tb_con_head < TB_CON_RING ? tb_con_head : TB_CON_RING;
++	unsigned int first = tb_con_head - n;
++	int r, c;
++
++	if (!tb_con_font)
++		tb_con_font = find_font("VGA8x16");
++
++	for (r = 0; r < TB_CON_LOG_ROWS; r++)
++		for (c = 0; c < TB_CON_COLS; c++)
++			tb_con_cell(fb, r, c,
++				    tb_con_ring[(first + r * TB_CON_COLS + c) % TB_CON_RING],
++				    0xffe0e0e0);
++
++	/* First band row is a live gauge: a photo of the panel then says how long the
++	 * kernel has been alive, how much it has logged, whether the heartbeat is
++	 * ticking, and whether the black box survived the last reset - which is what
++	 * separates "the kernel died" from "the display died". */
++	{
++		char gauge[TB_CON_COLS + 1];
++		int n = snprintf(gauge, sizeof(gauge),
++				 "BB b=%u ch=%u t=%us hb=%u u=%u %s %s",
++				 tb_bb_was_boots[0], tb_con_head,
++				 (unsigned int)((jiffies - INITIAL_JIFFIES) / HZ), tb_hb_count,
++				 tb_boot_stamp(),
++				 tb_bb_ok[0] ? "A:PREV" : "A:fresh",
++				 tb_bb_ok[1] ? "B:PREV" : "B:fresh");
++		int i;
++
++		for (i = 0; i < TB_CON_COLS; i++)
++			tb_bb_band[i] = (n > 0 && i < n) ? gauge[i] : ' ';
++	}
++
++	/* The rest of the band is redrawn with every refresh so the previous boot's
++	 * last lines cannot be scrolled away - they are the whole point of this
++	 * console. */
++	for (r = 0; r < TB_CON_BAND_ROWS; r++)
++		for (c = 0; c < TB_CON_COLS; c++)
++			tb_con_cell(fb, TB_CON_LOG_ROWS + r, c,
++				    tb_bb_band[r * TB_CON_COLS + c], 0xffffc000);
++
++	dcache_clean_poc((unsigned long)fb,
++			 (unsigned long)(fb + (unsigned long)TB_CON_ROWS * TB_CON_CELLH * TB_CON_W));
++}
++
++/* Repainting the panel costs 25 MB of writes plus a cache clean, and with
++ * ignore_loglevel in the cmdline the deferred-probe retry storm sends thousands
++ * of KERN_DEBUG lines through here - hundreds of gigabytes of framebuffer
++ * traffic, which is both why a boot that should take seconds takes ~29 and a
++ * credible way to starve the display's scanout of the same memory.  The panel
++ * shows the tail, so 2 Hz is plenty; the ring and the black box keep every byte. */
++#define TB_CON_REDRAW_JIFFIES	(HZ / 2)
++
++static unsigned long tb_con_next_draw;
++
++static void tb_con_write(struct console *co, const char *s, unsigned int n)
++{
++	unsigned int i;
++
++	for (i = 0; i < n; i++) {
++		if (s[i] == '\r')
++			continue;
++		tb_con_ring[tb_con_head % TB_CON_RING] = s[i];
++		tb_con_head++;
++	}
++	tb_bb_put(s, n);
++
++	if (time_after(jiffies, tb_con_next_draw)) {
++		tb_con_draw();
++		tb_con_next_draw = jiffies + TB_CON_REDRAW_JIFFIES;
++	}
++}
++
++static struct console tb_con = {
++	.name	= "tbfb",
++	.write	= tb_con_write,
++	.flags	= CON_PRINTBUFFER,
++	.index	= -1,
++};
++
++/* ---------------------------------------------------------------------------
++ * TB710FU: the previous boot's crash, read back out of ramoops.
++ *
++ * Nothing in this boot has touched 0xAC300000 by the time this runs, and the
++ * node carries no no-map, so the linear map covers it and a plain read works.
++ * The text is copied out first and printed afterwards, because the printk of
++ * the panel console must happen after that console is registered.
++ */
++#define TB_RAMOOPS_PA	0xAC300000UL
++#define TB_RAMOOPS_SZ	0x100000UL
++#define TB_PREV_MAX	3400
++
++/* TB710FU: 1 = print the previous boot's crash and stop (the screen is the
++ * deliverable); 0 = carry on booting normally. */
++#define TB_PREV_REPLAY 0
++
++static char tb_prev_crash[TB_PREV_MAX];
++
++static void __init tb_prev_crash_read(void)
++{
++	static const char *const needles[] = { "Unable to handle", "Kernel panic" };
++	const u8 *ram = (const u8 *)__va(TB_RAMOOPS_PA);
++	unsigned i, off, n = 0, run = 0;
++	int found = -1;
++
++	for (i = 0; i < ARRAY_SIZE(needles) && found < 0; i++) {
++		unsigned nl = strlen(needles[i]);
++
++		for (off = 0; off + nl < TB_RAMOOPS_SZ; off++) {
++			if (!memcmp(ram + off, needles[i], nl)) {
++				found = (int)off;
++				break;
++			}
++		}
++	}
++
++	if (found < 0)
++		return;
++
++	/* A little before the banner, for the lines that lead up to it. */
++	off = found > 200 ? (unsigned)found - 200 : 0;
++	while (n < TB_PREV_MAX - 1 && off < TB_RAMOOPS_SZ) {
++		char c = ram[off++];
++
++		if (c == '\n' || c == '\t')
++			run = 0;
++		else if (c < 32 || c > 126) {
++			if (++run > 24)
++				break;
++			c = ' ';
++		} else
++			run = 0;
++		tb_prev_crash[n++] = c;
++	}
++	tb_prev_crash[n] = 0;
++}
++
++static void __init tb_prev_crash_show(void)
++{
++	char *p = tb_prev_crash;
++
++	tb_prev_crash_read();
++	if (!*p)
++		return;
++
++	pr_info("=== PREVIOUS BOOT (ramoops) ===\n");
++	while (*p) {
++		char *nl = strchr(p, '\n');
++
++		if (nl)
++			*nl = 0;
++		pr_info("PREV| %s\n", p);
++		if (!nl)
++			break;
++		p = nl + 1;
++	}
++	pr_info("=== END PREVIOUS BOOT ===\n");
++}
++
+ void start_kernel(void)
+ {
+ 	char *command_line;
+ 	char *after_dashes;
+ 
++	/* TB710FU: identity, not __va: the linear map does not exist until
++	 * paging_init() runs inside setup_arch(), and map_kernel() maps only
++	 * the image. This call is the first statement of start_kernel, so
++	 * using __va() here stored to an unmapped address and killed the boot
++	 * before the banner could print. */
++	tb_mark(TB_FB_PHYS, 0x1001);		/* start_kernel entered */
+ 	set_task_stack_end_magic(&init_task);
+ 	smp_setup_processor_id();
+ 	debug_objects_early_init();
+@@ -1002,6 +2098,7 @@ void start_kernel(void)
+ 	page_address_init();
+ 	pr_notice("%s", linux_banner);
+ 	setup_arch(&command_line);
++	tb_mark((u64)__va(TB_FB_PHYS), 0x1002);
+ 	mm_core_init_early();
+ 	/* Static keys and static calls are needed by LSMs */
+ 	jump_label_init();
+@@ -1018,6 +2115,7 @@ void start_kernel(void)
+ 	print_kernel_cmdline(saved_command_line);
+ 	/* parameters may set static keys */
+ 	parse_early_param();
++	tb_mark((u64)__va(TB_FB_PHYS), 0x1003);
+ 	after_dashes = parse_args("Booting kernel",
+ 				  static_command_line, __start___param,
+ 				  __stop___param - __start___param,
+@@ -1041,6 +2139,7 @@ void start_kernel(void)
+ 	vfs_caches_init_early();
+ 	sort_main_extable();
+ 	trap_init();
++	tb_mark((u64)__va(TB_FB_PHYS), 0x1004);
+ 	mm_core_init();
+ 	maple_tree_init();
+ 	poking_init();
+@@ -1055,6 +2154,7 @@ void start_kernel(void)
+ 	 * time - but meanwhile we still have a functioning scheduler.
+ 	 */
+ 	sched_init();
++	tb_mark((u64)__va(TB_FB_PHYS), 0x1005);
+ 
+ 	if (WARN(!irqs_disabled(),
+ 		 "Interrupts were enabled *very* early, fixing it\n"))
+@@ -1119,7 +2219,19 @@ void start_kernel(void)
+ 	 * we've done PCI setups etc, and console_init() must be aware of
+ 	 * this. But we do want output early, in case something goes wrong.
+ 	 */
++	tb_bb_boot_marker();	/* seam: the previous boot's text sits above it */
++	tb_bb_load_prev();	/* and its last lines go in the band, before anything draws */
+ 	console_init();
++	register_console(&tb_con);	/* TB710FU: panel console, replays the ring */
++	tb_bb_report();
++	tb_prev_crash_show();
++#if TB_PREV_REPLAY
++	/* Replay build: the panel is the deliverable, so stop here and leave the
++	 * report where it can be read without racing anything. */
++	pr_info("=== REPLAY ONLY, NOT BOOTING ===\n");
++	for (;;)
++		cpu_relax();
++#endif
+ 	if (panic_later)
+ 		panic("Too many boot %s vars at `%s'", panic_later,
+ 		      panic_param);
+@@ -1183,6 +2295,7 @@ void start_kernel(void)
+ 
+ 	/* Do the rest non-__init'ed, we're now alive */
+ 	rest_init();
++	tb_mark((u64)__va(TB_FB_PHYS), 0x1006);
+ 
+ 	/*
+ 	 * Avoid stack canaries in callers of boot_init_stack_canary for gcc-10
+@@ -1346,6 +2459,7 @@ static inline void do_trace_initcall_level(const char *level)
+ 
+ int __init_or_module do_one_initcall(initcall_t fn)
+ {
++
+ 	int count = preempt_count();
+ 	char msgbuf[64];
+ 	int ret;
+@@ -1404,6 +2518,50 @@ static int __init ignore_unknown_bootoption(char *param, char *val,
+ 	return 0;
+ }
+ 
++/* TB710FU: where the initcall sequence has got to, as a position on the panel.
++ *
++ * Row 1200..1269, eight pixels wide, moved once per initcall: the x coordinate
++ * is 100 + index * 3, so the index is readable straight off a photo. The
++ * previous position is blanked, which also shows that the sequence is moving
++ * at all.
++ */
++static void __init tb_cursor(bool first_of_level)
++{
++	static int idx;
++	static int last = -1;
++	volatile u32 *fb = (volatile u32 *)__va(TB_FB_PHYS);
++	unsigned long start, end;
++	int r, c;
++
++	/* A white tick marks where a level began, so the level is readable off the
++	 * photo without arithmetic. */
++	if (first_of_level) {
++		for (r = 1150; r < 1185; r++)
++			for (c = 0; c < 4; c++)
++				fb[r * 3200 + 100 + idx + c] = 0xffffffff;
++	}
++	/* Every hundredth initcall gets a tick too, so the magnitude is readable
++	 * straight off the photo instead of being estimated from a fraction. */
++	if (!(idx % 100)) {
++		for (r = 1295; r < 1320; r++)
++			for (c = 0; c < 3; c++)
++				fb[r * 3200 + 100 + idx + c] = 0xffc0c0c0;
++	}
++	if (last >= 0) {
++		for (r = 1230; r < 1290; r++)
++			for (c = 0; c < 4; c++)
++				fb[r * 3200 + 100 + last + c] = 0;
++	}
++	for (r = 1230; r < 1290; r++)
++		for (c = 0; c < 4; c++)
++			fb[r * 3200 + 100 + idx + c] = 0xff00ff80;
++	last = idx;
++	start = (unsigned long)(fb + (unsigned long)1150 * 3200 + 100);
++	end = (unsigned long)(fb + (unsigned long)1320 * 3200);
++	dcache_clean_poc(start, end);
++	idx++;
++}
++
+ static void __init do_initcall_level(int level, char *command_line)
+ {
+ 	initcall_entry_t *fn;
+@@ -1415,8 +2573,10 @@ static void __init do_initcall_level(int level, char *command_line)
+ 		   NULL, ignore_unknown_bootoption);
+ 
+ 	do_trace_initcall_level(initcall_level_names[level]);
+-	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++)
++	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++) {
++		tb_cursor(fn == initcall_levels[level]);
+ 		do_one_initcall(initcall_from_entry(fn));
++	}
+ }
+ 
+ static void __init do_initcalls(void)
+@@ -1431,6 +2591,7 @@ static void __init do_initcalls(void)
+ 
+ 	for (level = 0; level < ARRAY_SIZE(initcall_levels) - 1; level++) {
+ 		/* Parser modifies command_line, restore it each time */
++		tb_mark((u64)__va(TB_FB_PHYS), 0x1040 + level);
+ 		strcpy(command_line, saved_command_line);
+ 		do_initcall_level(level, command_line);
+ 	}
+@@ -1548,6 +2709,7 @@ void __weak free_initmem(void)
+ 
+ static int __ref kernel_init(void *unused)
+ {
++	tb_mark((u64)__va(TB_FB_PHYS), 0x1030);	/* the init thread runs */
+ 	int ret;
+ 
+ 	init_userspace_fs();
+@@ -1558,6 +2720,7 @@ static int __ref kernel_init(void *unused)
+ 	wait_for_completion(&kthreadd_done);
+ 
+ 	kernel_init_freeable();
++	tb_mark((u64)__va(TB_FB_PHYS), 0x1031);	/* all initcalls done */
+ 	/* need to finish all async __init code before freeing the memory */
+ 	async_synchronize_full();
+ 
+@@ -1582,6 +2745,7 @@ static int __ref kernel_init(void *unused)
+ 
+ 	do_sysctl_args();
+ 
++	tb_mark((u64)__va(TB_FB_PHYS), 0x1032);	/* about to exec init */
+ 	if (ramdisk_execute_command) {
+ 		ret = run_init_process(ramdisk_execute_command);
+ 		if (!ret)
+diff --git a/kernel/panic.c b/kernel/panic.c
+index 213725b61..909c4d587 100644
+--- a/kernel/panic.c
++++ b/kernel/panic.c
+@@ -780,8 +780,16 @@ void vpanic(const char *fmt, va_list args)
+ EXPORT_SYMBOL(vpanic);
+ 
+ /* Identical to vpanic(), except it takes variadic arguments instead of va_list */
++/* TB710FU: the boot ladder lives in init/main.c; see tb_mark() there. A rung
++ * at the top of panic() is how a boot with no console still reports that it
++ * got here. The linear mapping address, because this runs in a kernel
++ * thread where TTBR0 no longer holds the identity map. */
++extern void tb_mark(u64 base, u32 code);
++#define TB_FB_LINEAR_VA	((u64)__va(0xd5100000UL))
++
+ void panic(const char *fmt, ...)
+ {
++	tb_mark(TB_FB_LINEAR_VA, 0x1033);
+ 	va_list args;
+ 
+ 	va_start(args, fmt);
+diff --git a/net/mac80211/rx.c b/net/mac80211/rx.c
+index 5e26be8e2..529421d48 100644
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -2802,6 +2802,7 @@ ieee80211_deliver_skb(struct ieee80211_rx_data *rx)
+ 	skb = rx->skb;
+ 	xmit_skb = NULL;
+ 
++
+ 	dev_sw_netstats_rx_add(dev, skb->len);
+ 
+ 	if (rx->sta) {
+diff --git a/sound/soc/codecs/Kconfig b/sound/soc/codecs/Kconfig
+index f9a47e262..194e0f1ed 100644
+--- a/sound/soc/codecs/Kconfig
++++ b/sound/soc/codecs/Kconfig
+@@ -664,6 +664,15 @@ config SND_SOC_AW8738
+ 	  SND_SOC_SIMPLE_AMPLIFIER, but additionally allows setting the
+ 	  operation mode using the Awinic-specific one-wire pulse control.
+ 
++config SND_SOC_AW882XX
++	tristate "Awinic AW882xx smart PA"
++	depends on I2C
++	select GPIOLIB
++	help
++	  Enable support for Awinic AW882xx smart speaker amplifiers.
++	  These drive the four built-in speakers on the Lenovo TB710FU
++	  (described by awinic,aw882xx_smartpa nodes).
++
+ config SND_SOC_AW88395_LIB
+ 	select CRC8
+ 	tristate
+diff --git a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
+index 3d122ace7..0a4eabda0 100644
+--- a/sound/soc/codecs/Makefile
++++ b/sound/soc/codecs/Makefile
+@@ -442,6 +442,14 @@ snd-soc-tas2780-y := tas2780.o
+ # Mux
+ snd-soc-simple-mux-y := simple-mux.o
+ 
++snd-soc-aw882xx-y := aw882xx/aw882xx_bin_parse.o \
++		     aw882xx/aw882xx_calib.o \
++		     aw882xx/aw882xx_device.o \
++		     aw882xx/aw882xx_dsp.o \
++		     aw882xx/aw882xx_init.o \
++		     aw882xx/aw882xx_monitor.o \
++		     aw882xx/aw882xx_spin.o \
++		     aw882xx/aw882xx.o
+ obj-$(CONFIG_SND_SOC_88PM860X)	+= snd-soc-88pm860x.o
+ obj-$(CONFIG_SND_SOC_AB8500_CODEC)	+= snd-soc-ab8500-codec.o
+ obj-$(CONFIG_SND_SOC_AC97_CODEC)	+= snd-soc-ac97.o
+@@ -496,6 +504,18 @@ obj-$(CONFIG_SND_SOC_AW87390)	+= snd-soc-aw87390.o
+ obj-$(CONFIG_SND_SOC_AW88081)	+= snd-soc-aw88081.o
+ obj-$(CONFIG_SND_SOC_AW88395_LIB) += snd-soc-aw88395-lib.o
+ obj-$(CONFIG_SND_SOC_AW88395)	+=snd-soc-aw88395.o
++obj-$(CONFIG_SND_SOC_AW882XX)	+= snd-soc-aw882xx.o
++
++# TB710FU debug: enable the Awinic drivers own logging (log.h gates on DEBUG)
++CFLAGS_aw882xx_bin_parse.o := -DDEBUG
++CFLAGS_aw882xx_calib.o := -DDEBUG
++CFLAGS_aw882xx_device.o := -DDEBUG
++CFLAGS_aw882xx_dsp.o := -DDEBUG
++CFLAGS_aw882xx_init.o := -DDEBUG
++CFLAGS_aw882xx_monitor.o := -DDEBUG
++CFLAGS_aw882xx_spin.o := -DDEBUG
++CFLAGS_aw882xx.o := -DDEBUG
++
+ obj-$(CONFIG_SND_SOC_AW88166)	+=snd-soc-aw88166.o
+ obj-$(CONFIG_SND_SOC_AW88261)	+=snd-soc-aw88261.o
+ obj-$(CONFIG_SND_SOC_AW88399)	+= snd-soc-aw88399.o
+diff --git a/sound/soc/qcom/qdsp6/audioreach.c b/sound/soc/qcom/qdsp6/audioreach.c
+index cce0ad31f..75c862670 100644
+--- a/sound/soc/qcom/qdsp6/audioreach.c
++++ b/sound/soc/qcom/qdsp6/audioreach.c
+@@ -460,11 +460,12 @@ static void audioreach_populate_graph(struct q6apm *apm,
+ 				for (pn = 0; pn < module->max_op_port; pn++) {
+ 					if (module->dst_mod_inst_id[pn]) {
+ 						conn_obj = &mc_data->conn_obj[nconn];
+-						conn_obj->src_mod_inst_id = module->instance_id;
++						conn_obj->src_mod_inst_id =
++							module->instance_id;
+ 						conn_obj->src_mod_op_port_id =
+ 								module->src_mod_op_port_id[pn];
+ 						conn_obj->dst_mod_inst_id =
+-								module->dst_mod_inst_id[pn];
++							module->dst_mod_inst_id[pn];
+ 						conn_obj->dst_mod_ip_port_id =
+ 								module->dst_mod_ip_port_id[pn];
+ 						nconn++;
+@@ -472,7 +473,7 @@ static void audioreach_populate_graph(struct q6apm *apm,
+ 				}
+ 			}
+ 			mlobj = (void *) mlobj + APM_MOD_LIST_OBJ_PSIZE(mlobj,
+-									container->num_modules);
++					container->num_modules);
+ 
+ 			ncontainer++;
+ 		}
+@@ -517,9 +518,8 @@ void *audioreach_alloc_graph_pkt(struct q6apm *apm,
+ 			ml_sz = ml_sz + sizeof(struct apm_module_list_params) +
+ 				APM_MOD_LIST_OBJ_PSIZE(mlobj, container->num_modules);
+ 
+-			list_for_each_entry(module, &container->modules_list, node) {
++			list_for_each_entry(module, &container->modules_list, node)
+ 				num_connections += module->num_connections;
+-			}
+ 		}
+ 	}
+ 
+@@ -998,6 +998,405 @@ int audioreach_compr_set_param(struct q6apm_graph *graph,
+ }
+ EXPORT_SYMBOL_GPL(audioreach_compr_set_param);
+ 
++/* TB710FU: parameter sender for the vendor TDM endpoint (0x0700100E). */
++static int audioreach_audio_if_set_media_format(struct q6apm_graph *graph,
++						const struct audioreach_module *module,
++						const struct audioreach_module_config *cfg);
++static int audioreach_i2s_set_media_format(struct q6apm_graph *graph,
++					   const struct audioreach_module *module,
++					   const struct audioreach_module_config *cfg);
++static int audioreach_codec_dma_set_media_format(struct q6apm_graph *graph,
++						 const struct audioreach_module *module,
++						 const struct audioreach_module_config *cfg);
++static int tb_tdmmode = 1;
++module_param(tb_tdmmode, int, 0644);
++static int tb_qaif = -1;
++module_param(tb_qaif, int, 0644);
++static int tb_tdmbits = -1;
++module_param(tb_tdmbits, int, 0644);
++
++/* TB710FU: raw SET_CFG sender + parameter-id scanner for module 0x0700100E. */
++static int tb_scan_lo = -1;
++module_param(tb_scan_lo, int, 0644);
++static int tb_scan_hi = -1;
++module_param(tb_scan_hi, int, 0644);
++static int tb_scan_size = 32;
++module_param(tb_scan_size, int, 0644);
++static int tb_probe_id = -1;
++module_param(tb_probe_id, int, 0644);
++static int tb_probe_size = 36;
++module_param(tb_probe_size, int, 0644);
++static int tb_p0, tb_p1, tb_p2, tb_p3, tb_p4, tb_p5, tb_p6, tb_p7, tb_p8;
++module_param(tb_p0, int, 0644);
++module_param(tb_p1, int, 0644);
++module_param(tb_p2, int, 0644);
++module_param(tb_p3, int, 0644);
++module_param(tb_p4, int, 0644);
++module_param(tb_p5, int, 0644);
++module_param(tb_p6, int, 0644);
++module_param(tb_p7, int, 0644);
++module_param(tb_p8, int, 0644);
++static int tb_usep;
++module_param(tb_usep, int, 0644);
++
++static int tb_tdm_raw_param(struct q6apm_graph *graph,
++			    const struct audioreach_module *module,
++			    u32 param_id, int dlen)
++{
++	struct apm_module_param_data *pd;
++	u32 words[9];
++	u8 zeros[256] = {};
++	int size = ALIGN(APM_MODULE_PARAM_DATA_SIZE + dlen, 8);
++	struct gpr_pkt *pkt __free(kfree);
++	void *p;
++	int i;
++
++	if (dlen > sizeof(zeros))
++		dlen = sizeof(zeros);
++
++	if (tb_usep) {
++		words[0] = tb_p0; words[1] = tb_p1; words[2] = tb_p2;
++		words[3] = tb_p3; words[4] = tb_p4; words[5] = tb_p5;
++		words[6] = tb_p6; words[7] = tb_p7; words[8] = tb_p8;
++		for (i = 0; i < 9 && (i + 1) * 4 <= dlen; i++)
++			memcpy(zeros + i * 4, &words[i], 4);
++	}
++
++	pkt = audioreach_alloc_apm_cmd_pkt(size, APM_CMD_SET_CFG, 0);
++	if (IS_ERR(pkt))
++		return PTR_ERR(pkt);
++
++	p = (void *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
++	pd = p;
++	pd->module_instance_id = module->instance_id;
++	pd->error_code = 0;
++	pd->param_id = param_id;
++	pd->param_size = dlen;
++	memcpy(p + APM_MODULE_PARAM_DATA_SIZE, zeros, dlen);
++
++	return q6apm_send_cmd_sync(graph->apm, pkt, 0);
++}
++
++static int tb_tdm_send_param(struct q6apm_graph *graph,
++			     const struct audioreach_module *module,
++			     const struct audioreach_module_config *cfg, int bit)
++{
++	struct apm_module_hw_ep_frame_duration_cfg *fd_cfg;
++	struct apm_module_frame_size_factor_cfg *fs_cfg;
++	struct apm_audio_if_module_intf_cfg *aif_cfg;
++	struct apm_i2s_module_intf_cfg *i2s_cfg;
++	struct apm_module_hw_ep_mf_cfg *hw_cfg;
++	struct apm_module_param_data *param_data;
++	u32 slot_mask = cfg->slot_mask ? cfg->slot_mask : module->slot_mask;
++	u16 nslots = cfg->nslots_per_frame ?
++			     (u16)cfg->nslots_per_frame : module->nslots_per_frame;
++	u16 swidth = cfg->slot_width ? (u16)cfg->slot_width : module->slot_width;
++	int size, rc;
++	void *p;
++	struct gpr_pkt *pkt __free(kfree);
++
++	if (bit == 1)
++		size = APM_AUDIO_IF_INTF_CFG_PSIZE;
++	else if (bit == 2)
++		size = APM_HW_EP_CFG_PSIZE;
++	else if (bit == 4)
++		size = APM_FS_CFG_PSIZE;
++	else if (bit == 8)
++		size = APM_HW_EP_FRAME_DURATION_PSIZE;
++	else if (bit == 16)
++		size = APM_I2S_INTF_CFG_PSIZE;
++	else
++		return 0;
++
++	pkt = audioreach_alloc_apm_cmd_pkt(size, APM_CMD_SET_CFG, 0);
++	if (IS_ERR(pkt))
++		return PTR_ERR(pkt);
++
++	p = (void *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
++
++	switch (bit) {
++	case 1:
++		aif_cfg = p;
++		param_data = &aif_cfg->param_data;
++		param_data->module_instance_id = module->instance_id;
++		param_data->error_code = 0;
++		param_data->param_id = PARAM_ID_AUDIO_IF_INTF_CFG;
++		param_data->param_size = size - APM_MODULE_PARAM_DATA_SIZE;
++		aif_cfg->cfg.qaif_type = module->qaif_type;
++		aif_cfg->cfg.intf_idx = (u16)module->hw_interface_idx;
++		aif_cfg->cfg.intf_mode = module->intf_mode;
++		aif_cfg->cfg.ctrl_data_out_enable = module->ctrl_data_out_enable;
++		aif_cfg->cfg.active_slot_mask = slot_mask;
++		aif_cfg->cfg.nslots_per_frame = nslots;
++		aif_cfg->cfg.slot_width = swidth;
++		aif_cfg->cfg.active_lane_mask = module->active_lane_mask;
++		aif_cfg->cfg.frame_sync_rate = module->frame_sync_rate;
++		aif_cfg->cfg.frame_sync_src = module->sync_src;
++		aif_cfg->cfg.frame_sync_mode = module->sync_mode;
++		aif_cfg->cfg.invert_frame_sync_pulse = module->ctrl_invert_sync_pulse;
++		aif_cfg->cfg.frame_sync_data_delay = module->ctrl_sync_data_delay;
++		aif_cfg->cfg.bit_clk_type = module->bit_clk_type;
++		aif_cfg->cfg.inv_int_bit_clk = module->inv_int_bit_clk;
++		aif_cfg->cfg.inv_ext_bit_clk = module->inv_ext_bit_clk;
++		break;
++	case 2:
++		hw_cfg = p;
++		param_data = &hw_cfg->param_data;
++		param_data->module_instance_id = module->instance_id;
++		param_data->error_code = 0;
++		param_data->param_id = PARAM_ID_HW_EP_MF_CFG;
++		param_data->param_size = size - APM_MODULE_PARAM_DATA_SIZE;
++		hw_cfg->mf.sample_rate = cfg->sample_rate;
++		hw_cfg->mf.bit_width = cfg->bit_width;
++		hw_cfg->mf.num_channels = cfg->num_channels;
++		hw_cfg->mf.data_format = module->data_format;
++		break;
++	case 4:
++		fs_cfg = p;
++		param_data = &fs_cfg->param_data;
++		param_data->module_instance_id = module->instance_id;
++		param_data->error_code = 0;
++		param_data->param_id = PARAM_ID_HW_EP_FRAME_SIZE_FACTOR;
++		param_data->param_size = size - APM_MODULE_PARAM_DATA_SIZE;
++		fs_cfg->frame_size_factor = 1;
++		break;
++	case 8:
++		fd_cfg = p;
++		param_data = &fd_cfg->param_data;
++		param_data->module_instance_id = module->instance_id;
++		param_data->error_code = 0;
++		param_data->param_id = PARAM_ID_HW_EP_FRAME_DURATION;
++		param_data->param_size = size - APM_MODULE_PARAM_DATA_SIZE;
++		fd_cfg->frame_duration.frame_duration_in_us = AUDIO_IF_FRAME_DURATION_US;
++		fd_cfg->frame_duration.allow_frame_duration_normalization =
++			AUDIO_IF_FRAME_DURATION_NORMALIZATION_ENABLE;
++		fd_cfg->frame_duration.min_normalized_frame_dur_us = AUDIO_IF_FRAME_DURATION_MIN_US;
++		fd_cfg->frame_duration.max_normalized_frame_dur_us = AUDIO_IF_FRAME_DURATION_MAX_US;
++		break;
++	case 16:
++		i2s_cfg = p;
++		param_data = &i2s_cfg->param_data;
++		param_data->module_instance_id = module->instance_id;
++		param_data->error_code = 0;
++		param_data->param_id = PARAM_ID_I2S_INTF_CFG;
++		param_data->param_size = size - APM_MODULE_PARAM_DATA_SIZE;
++		i2s_cfg->cfg.lpaif_type = module->hw_interface_type;
++		i2s_cfg->cfg.intf_idx = module->hw_interface_idx;
++		i2s_cfg->cfg.sd_line_idx = module->sd_line_idx ? module->sd_line_idx : 2;
++		i2s_cfg->cfg.ws_src = CONFIG_I2S_WS_SRC_INTERNAL;
++		break;
++	}
++
++	rc = q6apm_send_cmd_sync(graph->apm, pkt, 0);
++	dev_info(graph->dev, "TB TDM param bit=%d rc=%d\n", bit, rc);
++	return rc;
++}
++
++static int audioreach_tdm_sink_set_media_format(struct q6apm_graph *graph,
++						const struct audioreach_module *module,
++						const struct audioreach_module_config *cfg)
++{
++	if (tb_tdmmode == 4) {
++		struct param_id_audio_if_intf_cfg *ic;
++		struct apm_module_param_data *pd;
++		/* TB710FU: the tplg carries the vendor's 4-slot mask; the DAI
++		 * path can end up with a stale value, so prefer the tplg. */
++		u32 slot_mask = module->slot_mask ? module->slot_mask : cfg->slot_mask;
++		u16 nslots = cfg->nslots_per_frame ?
++			     (u16)cfg->nslots_per_frame : module->nslots_per_frame;
++		u16 swidth = cfg->slot_width ? (u16)cfg->slot_width : module->slot_width;
++		int size = ALIGN(APM_MODULE_PARAM_DATA_SIZE + sizeof(*ic), 8);
++		struct gpr_pkt *pkt __free(kfree);
++		void *p;
++		int rc;
++
++		tb_tdm_send_param(graph, module, cfg, 2);
++		tb_tdm_send_param(graph, module, cfg, 4);
++
++		pkt = audioreach_alloc_apm_cmd_pkt(size, APM_CMD_SET_CFG, 0);
++		if (IS_ERR(pkt))
++			return PTR_ERR(pkt);
++
++		p = (void *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
++		pd = p;
++		pd->module_instance_id = module->instance_id;
++		pd->error_code = 0;
++		pd->param_id = 0x0800113c;
++		pd->param_size = sizeof(*ic);
++		ic = p + APM_MODULE_PARAM_DATA_SIZE;
++		memset(ic, 0, sizeof(*ic));
++		ic->qaif_type = module->qaif_type;
++		ic->intf_idx = (u16)module->hw_interface_idx;
++		ic->intf_mode = module->intf_mode;
++		ic->ctrl_data_out_enable = module->ctrl_data_out_enable;
++		ic->active_slot_mask = slot_mask;
++		ic->nslots_per_frame = nslots;
++		ic->slot_width = swidth;
++		ic->active_lane_mask = module->active_lane_mask;
++		ic->frame_sync_rate = module->frame_sync_rate;
++		ic->frame_sync_src = module->sync_src;
++		ic->frame_sync_mode = module->sync_mode;
++		ic->invert_frame_sync_pulse = module->ctrl_invert_sync_pulse;
++		ic->frame_sync_data_delay = module->ctrl_sync_data_delay;
++		ic->bit_clk_type = module->bit_clk_type;
++		if ((cfg->fmt & SND_SOC_DAIFMT_INV_MASK) == SND_SOC_DAIFMT_IB_NF ||
++		    (cfg->fmt & SND_SOC_DAIFMT_INV_MASK) == SND_SOC_DAIFMT_IB_IF)
++			ic->inv_int_bit_clk = 1;
++		if ((cfg->fmt & SND_SOC_DAIFMT_INV_MASK) == SND_SOC_DAIFMT_NB_IF ||
++		    (cfg->fmt & SND_SOC_DAIFMT_INV_MASK) == SND_SOC_DAIFMT_IB_IF)
++			ic->invert_frame_sync_pulse = 1;
++
++		rc = q6apm_send_cmd_sync(graph->apm, pkt, 0);
++		dev_info(graph->dev, "TB TDM mode4 rc=%d payload(mask=0x%x ns=%d w=%d mode=%d sync=%d src=%d inv=%d dly=%d)\n",
++			 rc, ic->active_slot_mask, ic->nslots_per_frame, ic->slot_width,
++			 ic->intf_mode, ic->frame_sync_mode, ic->frame_sync_src,
++			 ic->inv_int_bit_clk, ic->frame_sync_data_delay);
++		dev_info(graph->dev, "TB TDM mode4 srcs(cfg mask=0x%x ns=%d w=%d fmt=0x%x | tplg mask=0x%x ns=%d w=%d idx=%d mode=%d sync=%d src=%d inv=%d dly=%d dfmt=%d)\n",
++			 cfg->slot_mask, cfg->nslots_per_frame, cfg->slot_width, cfg->fmt,
++			 module->slot_mask, module->nslots_per_frame, module->slot_width,
++			 module->hw_interface_idx, module->intf_mode, module->sync_mode,
++			 module->sync_src, module->ctrl_invert_sync_pulse,
++			 module->ctrl_sync_data_delay, module->data_format);
++		return 0;
++	}
++
++	if (tb_tdmmode == 5) {
++		struct apm_module_hw_ep_power_mode_cfg *pm;
++		struct apm_module_frame_size_factor_cfg *fsc;
++		struct param_id_audio_if_intf_cfg *ic;
++		struct apm_module_hw_ep_mf_cfg *mf;
++		struct apm_module_param_data *pd;
++		u32 slot_mask = module->slot_mask ? module->slot_mask : cfg->slot_mask;
++		u16 nslots = module->nslots_per_frame ?
++			     (u16)module->nslots_per_frame : cfg->nslots_per_frame;
++		u16 swidth = module->slot_width ? (u16)module->slot_width : cfg->slot_width;
++		int isz = ALIGN(APM_MODULE_PARAM_DATA_SIZE + sizeof(*ic), 8);
++		int msz = APM_HW_EP_CFG_PSIZE;
++		int fsz = APM_FS_CFG_PSIZE;
++		int psz = APM_HW_EP_PMODE_CFG_PSIZE;
++		int size = isz + msz + fsz + psz;
++		struct gpr_pkt *pkt __free(kfree);
++		void *p;
++		int rc;
++
++		pkt = audioreach_alloc_apm_cmd_pkt(size, APM_CMD_SET_CFG, 0);
++		if (IS_ERR(pkt))
++			return PTR_ERR(pkt);
++
++		p = (void *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
++
++		pd = p;
++		pd->module_instance_id = module->instance_id;
++		pd->error_code = 0;
++		pd->param_id = 0x0800113c;
++		pd->param_size = sizeof(*ic);
++		ic = p + APM_MODULE_PARAM_DATA_SIZE;
++		memset(ic, 0, sizeof(*ic));
++		ic->qaif_type = module->qaif_type;
++		ic->intf_idx = (u16)module->hw_interface_idx;
++		ic->intf_mode = module->intf_mode;
++		ic->ctrl_data_out_enable = module->ctrl_data_out_enable;
++		ic->active_slot_mask = slot_mask;
++		ic->nslots_per_frame = nslots;
++		ic->slot_width = swidth;
++		ic->active_lane_mask = module->active_lane_mask;
++		ic->frame_sync_rate = module->frame_sync_rate;
++		ic->frame_sync_src = module->sync_src;
++		ic->frame_sync_mode = module->sync_mode;
++		ic->invert_frame_sync_pulse = module->ctrl_invert_sync_pulse;
++		ic->frame_sync_data_delay = module->ctrl_sync_data_delay;
++		ic->bit_clk_type = module->bit_clk_type;
++		if ((cfg->fmt & SND_SOC_DAIFMT_INV_MASK) == SND_SOC_DAIFMT_IB_NF ||
++		    (cfg->fmt & SND_SOC_DAIFMT_INV_MASK) == SND_SOC_DAIFMT_IB_IF)
++			ic->inv_int_bit_clk = 1;
++		p += isz;
++
++		mf = p;
++		pd = &mf->param_data;
++		pd->module_instance_id = module->instance_id;
++		pd->error_code = 0;
++		pd->param_id = PARAM_ID_HW_EP_MF_CFG;
++		pd->param_size = msz - APM_MODULE_PARAM_DATA_SIZE;
++		mf->mf.sample_rate = cfg->sample_rate;
++		mf->mf.bit_width = cfg->bit_width;
++		mf->mf.num_channels = cfg->num_channels;
++		mf->mf.data_format = module->data_format;
++		p += msz;
++
++		fsc = p;
++		pd = &fsc->param_data;
++		pd->module_instance_id = module->instance_id;
++		pd->error_code = 0;
++		pd->param_id = PARAM_ID_HW_EP_FRAME_SIZE_FACTOR;
++		pd->param_size = fsz - APM_MODULE_PARAM_DATA_SIZE;
++		fsc->frame_size_factor = 1;
++		p += fsz;
++
++		pm = p;
++		pd = &pm->param_data;
++		pd->module_instance_id = module->instance_id;
++		pd->error_code = 0;
++		pd->param_id = PARAM_ID_HW_EP_POWER_MODE_CFG;
++		pd->param_size = psz - APM_MODULE_PARAM_DATA_SIZE;
++		pm->power_mode.power_mode = 0;
++		p += psz;
++
++		rc = q6apm_send_cmd_sync(graph->apm, pkt, 0);
++		return 0;
++	}
++
++	if (tb_scan_lo >= 0 && tb_scan_lo <= tb_scan_hi) {
++		int id, rc;
++
++		for (id = tb_scan_lo; id <= tb_scan_hi; id++) {
++			rc = tb_tdm_raw_param(graph, module, id, tb_scan_size);
++			if (!rc)
++				dev_info(graph->dev, "TBSCAN HIT id=0x%08x size=%d\n",
++					 id, tb_scan_size);
++		}
++		dev_info(graph->dev, "TBSCAN done %x..%x size=%d\n",
++			 tb_scan_lo, tb_scan_hi, tb_scan_size);
++		return 0;
++	}
++
++	if (tb_probe_id >= 0) {
++		int rc;
++
++		tb_tdm_send_param(graph, module, cfg, 2);
++		tb_tdm_send_param(graph, module, cfg, 4);
++		tb_tdm_raw_param(graph, module, 0x08001176, 4);
++		rc = tb_tdm_raw_param(graph, module, tb_probe_id, tb_probe_size);
++
++		dev_info(graph->dev, "TBPROBE id=0x%08x size=%d rc=%d\n",
++			 tb_probe_id, tb_probe_size, rc);
++		return 0;
++	}
++
++	if (tb_tdmbits < 0) {
++		if (tb_tdmmode == 1)
++			return audioreach_audio_if_set_media_format(graph, module, cfg);
++		if (tb_tdmmode == 2)
++			return audioreach_i2s_set_media_format(graph, module, cfg);
++		if (tb_tdmmode == 3)
++			return audioreach_codec_dma_set_media_format(graph, module, cfg);
++		return 0;
++	}
++
++	/* probe mode: one SET_CFG per parameter, keep going on errors */
++	if (tb_tdmbits & 1)
++		tb_tdm_send_param(graph, module, cfg, 1);
++	if (tb_tdmbits & 2)
++		tb_tdm_send_param(graph, module, cfg, 2);
++	if (tb_tdmbits & 4)
++		tb_tdm_send_param(graph, module, cfg, 4);
++	if (tb_tdmbits & 8)
++		tb_tdm_send_param(graph, module, cfg, 8);
++	if (tb_tdmbits & 16)
++		tb_tdm_send_param(graph, module, cfg, 16);
++
++	return 0;
++}
++
+ static int audioreach_i2s_set_media_format(struct q6apm_graph *graph,
+ 					   const struct audioreach_module *module,
+ 					   const struct audioreach_module_config *cfg)
+@@ -1027,7 +1426,10 @@ static int audioreach_i2s_set_media_format(struct q6apm_graph *graph,
+ 
+ 	intf_cfg->cfg.lpaif_type = module->hw_interface_type;
+ 	intf_cfg->cfg.intf_idx = module->hw_interface_idx;
+-	intf_cfg->cfg.sd_line_idx = module->sd_line_idx;
++	/* TB710FU: the speaker amps are wired to the second serial-data line
++	 * (SD1, i2s1_data1 / gpio124).  The tplg carries no SD_LINE token, and
++	 * the DSP rejects line 0, so default to SD1. */
++	intf_cfg->cfg.sd_line_idx = module->sd_line_idx ? module->sd_line_idx : 2;
+ 
+ 	switch (cfg->fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+ 	case SND_SOC_DAIFMT_BP_FP:
+@@ -1464,6 +1866,7 @@ static int audioreach_speaker_protection_vi(struct q6apm_graph *graph,
+ 	return rc;
+ }
+ 
++
+ int audioreach_set_media_format(struct q6apm_graph *graph,
+ 				const struct audioreach_module *module,
+ 				const struct audioreach_module_config *cfg)
+@@ -1531,6 +1934,15 @@ int audioreach_set_media_format(struct q6apm_graph *graph,
+ 	case MODULE_ID_AUDIO_IF_SINK:
+ 		rc = audioreach_audio_if_set_media_format(graph, module, cfg);
+ 		break;
++	case MODULE_ID_TDM_SINK: {
++		struct audioreach_module tmod = *module;
++
++		if (tb_qaif >= 0)
++			tmod.qaif_type = tb_qaif;
++
++		rc = audioreach_tdm_sink_set_media_format(graph, &tmod, cfg);
++		break;
++	}
+ 
+ 	default:
+ 		rc = 0;
+diff --git a/sound/soc/qcom/qdsp6/audioreach.h b/sound/soc/qcom/qdsp6/audioreach.h
+index 35541b2d8..9b8b66f40 100644
+--- a/sound/soc/qcom/qdsp6/audioreach.h
++++ b/sound/soc/qcom/qdsp6/audioreach.h
+@@ -38,6 +38,7 @@ struct q6apm_graph;
+ #define MODULE_ID_OPUS_DEC		0x07001174
+ #define MODULE_ID_AUDIO_IF_SINK		0x0700117C
+ #define MODULE_ID_AUDIO_IF_SOURCE	0x0700117D
++#define MODULE_ID_TDM_SINK		0x0700100E
+ 
+ #define APM_CMD_GET_SPF_STATE		0x01001021
+ #define APM_CMD_RSP_GET_SPF_STATE	0x02001007
+diff --git a/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c b/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
+index e204fd59e..a1483a835 100644
+--- a/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
++++ b/sound/soc/qcom/qdsp6/q6apm-lpass-dais.c
+@@ -393,6 +393,7 @@ static int q6tdm_set_tdm_slot(struct snd_soc_dai *dai,
+ 			return -EINVAL;
+ 		}
+ 
++		dev_info(dai->dev, "TB TDM set_tdm_slot: dai_id=%d tx=0x%x rx=0x%x slots=%d width=%d -> mask=0x%x\n", dai->id, tx_mask, rx_mask, slots, slot_width, slot_mask);
+ 		cfg->nslots_per_frame = slots;
+ 		cfg->slot_width = slot_width;
+ 		cfg->slot_mask = slot_mask;
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index f167b9dae..9ce899f79 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -446,6 +446,7 @@ int q6apm_graph_media_format_pcm(struct q6apm_graph *graph, struct audioreach_mo
+ 	struct audioreach_sub_graph *sgs;
+ 	struct audioreach_container *container;
+ 	struct audioreach_module *module;
++	struct audioreach_module_config ncfg;
+ 	int ret;
+ 
+ 	list_for_each_entry(sgs, &info->sg_list, node) {
+@@ -457,7 +458,18 @@ int q6apm_graph_media_format_pcm(struct q6apm_graph *graph, struct audioreach_mo
+ 					(module->module_id == MODULE_ID_SH_MEM_PUSH_MODE))
+ 					continue;
+ 
+-				ret = audioreach_set_media_format(graph, module, cfg);
++				ncfg = *cfg;
++				if (module->module_id == MODULE_ID_MFC ||
++				    module->module_id == MODULE_ID_DATA_LOGGING) {
++					/* TB710FU: upmix to 4ch/S32 at the FE tail so
++					 * all four TDM slots carry data and the
++					 * cross-graph connection matches the 4ch BE. */
++					ncfg.bit_width = 32;
++					ncfg.num_channels = 4;
++					audioreach_set_default_channel_mapping(ncfg.channel_map, 4);
++				}
++
++				ret = audioreach_set_media_format(graph, module, &ncfg);
+ 				if (ret)
+ 					return ret;
+ 			}
+diff --git a/sound/soc/qcom/qdsp6/topology.c b/sound/soc/qcom/qdsp6/topology.c
+index faafbc5c0..a2240d9be 100644
+--- a/sound/soc/qcom/qdsp6/topology.c
++++ b/sound/soc/qcom/qdsp6/topology.c
+@@ -903,6 +903,13 @@ static int audioreach_widget_load_buffer(struct snd_soc_component *component,
+ 	case MODULE_ID_I2S_SOURCE:
+ 		audioreach_widget_i2s_module_load(mod, mod_array);
+ 		break;
++	case MODULE_ID_TDM_SINK:
++		/* TB710FU: vendor TDM endpoint (not in mainline); carry the
++		 * full TDM token set (slots/sync/intf mode) like audio-if. */
++		ret = audioreach_widget_audio_if_module_load(mod, mod_array);
++		if (ret)
++			return ret;
++		break;
+ 	case MODULE_ID_AUDIO_IF_SINK:
+ 	case MODULE_ID_AUDIO_IF_SOURCE:
+ 		ret = audioreach_widget_audio_if_module_load(mod, mod_array);
+diff --git a/sound/soc/qcom/sc8280xp.c b/sound/soc/qcom/sc8280xp.c
+index 4d48e1012..8e0629ad1 100644
+--- a/sound/soc/qcom/sc8280xp.c
++++ b/sound/soc/qcom/sc8280xp.c
+@@ -126,7 +126,15 @@ static int sc8280xp_tdm_hw_params(struct snd_pcm_substream *substream,
+ 	if (!cpu_cfg.slots)
+ 		return 0;
+ 
+-	ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
++	{
++		/* TB710FU: the AW2308 speaker amps run in DSP_B timing with an
++		 * inverted bit clock (per the vendor's Android configuration). */
++		unsigned int fmt = SND_SOC_DAIFMT_BP_FP;
++
++		if (cpu_dai->id == SECONDARY_TDM_RX_0)
++			fmt |= SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_IB_NF;
++		ret = snd_soc_dai_set_fmt(cpu_dai, fmt);
++	}
+ 	if (ret && ret != -ENOTSUPP)
+ 		return ret;
+ 
+@@ -236,6 +244,14 @@ static int sc8280xp_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
+ 	case TX_CODEC_DMA_TX_3:
+ 		channels->min = 1;
+ 		break;
++	case SECONDARY_TDM_RX_0:
++		snd_mask_none(fmt);
++		snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S32_LE);
++		/* TB710FU: Android uses 4ch/32bit on TDM-LPAIF-RX-SECONDARY
++		 * (vendor resourcemanager_pineapple_mtp.xml). */
++		channels->min = 4;
++		channels->max = 4;
++		break;
+ 	default:
+ 		break;
+ 	}
+diff --git a/sound/soc/soc-pcm.c b/sound/soc/soc-pcm.c
+index 0e49290a8..bca2c65d9 100644
+--- a/sound/soc/soc-pcm.c
++++ b/sound/soc/soc-pcm.c
+@@ -976,22 +976,31 @@ static int __soc_pcm_open(struct snd_soc_pcm_runtime *rtd,
+ 		pinctrl_pm_select_default_state(component->dev);
+ 
+ 	ret = snd_soc_pcm_component_pm_runtime_get(rtd, substream);
+-	if (ret < 0)
++	if (ret < 0) {
++		dev_err(rtd->dev, "TBPROBE:open:step1 pm_runtime ret=%d\n", ret);
+ 		goto err;
++	}
+ 
+ 	ret = soc_pcm_components_open(substream);
+-	if (ret < 0)
++	if (ret < 0) {
++		dev_err(rtd->dev, "TBPROBE:open:step2 comp_open ret=%d\n", ret);
+ 		goto err;
++	}
+ 
+ 	ret = snd_soc_link_startup(substream);
+-	if (ret < 0)
++	if (ret < 0) {
++		dev_err(rtd->dev, "TBPROBE:open:step3 link_startup ret=%d\n", ret);
+ 		goto err;
++	}
+ 
+ 	/* startup the audio subsystem */
+ 	for_each_rtd_dais(rtd, i, dai) {
+ 		ret = snd_soc_dai_startup(dai, substream);
+-		if (ret < 0)
++		if (ret < 0) {
++			dev_err(rtd->dev, "TBPROBE:open:step4 dai_startup(%s) ret=%d\n",
++				dai->name, ret);
+ 			goto err;
++		}
+ 	}
+ 
+ 	/* Dynamic PCM DAI links compat checks use dynamic capabilities */
+@@ -1023,6 +1032,7 @@ static int __soc_pcm_open(struct snd_soc_pcm_runtime *rtd,
+ 			goto err;
+ 	}
+ dynamic:
++	dev_err(rtd->dev, "TBPROBE:open:reached-dynamic %s\n", rtd->dai_link->name);
+ 	snd_soc_runtime_activate(rtd, substream->stream);
+ 	ret = 0;
+ err:
+@@ -2070,15 +2080,19 @@ static int dpcm_fe_dai_startup(struct snd_pcm_substream *fe_substream)
+ 	dpcm_set_fe_update_state(fe, stream, SND_SOC_DPCM_UPDATE_FE);
+ 
+ 	ret = dpcm_be_dai_startup(fe, stream);
+-	if (ret < 0)
++	if (ret < 0) {
++		dev_err(fe->dev, "TBPROBE:fe_startup:be_dai_startup ret=%d\n", ret);
+ 		goto be_err;
++	}
+ 
+ 	dev_dbg(fe->dev, "ASoC: open FE %s\n", fe->dai_link->name);
+ 
+ 	/* start the DAI frontend */
+ 	ret = __soc_pcm_open(fe, fe_substream);
+-	if (ret < 0)
++	if (ret < 0) {
++		dev_err(fe->dev, "TBPROBE:fe_startup:__soc_pcm_open ret=%d\n", ret);
+ 		goto unwind;
++	}
+ 
+ 	fe->dpcm[stream].state = SND_SOC_DPCM_STATE_OPEN;
+ 
+@@ -2089,6 +2103,7 @@ static int dpcm_fe_dai_startup(struct snd_pcm_substream *fe_substream)
+ 	dpcm_runtime_setup_be_rate(fe_substream);
+ 
+ 	ret = dpcm_apply_symmetry(fe_substream, stream);
++	dev_err(fe->dev, "TBPROBE:fe_startup:apply_symmetry ret=%d\n", ret);
+ 
+ unwind:
+ 	if (ret < 0)
+@@ -2885,7 +2900,9 @@ static int dpcm_fe_dai_open(struct snd_pcm_substream *fe_substream)
+ 
+ 	snd_soc_dpcm_mutex_lock(fe);
+ 
++	dev_err(fe->dev, "TBPROBE:fe_open: enter %s\n", fe->dai_link->name);
+ 	ret = dpcm_path_get(fe, stream, &list);
++	dev_err(fe->dev, "TBPROBE:fe_open: path_get ret=%d\n", ret);
+ 	if (ret < 0)
+ 		goto open_end;
+ 

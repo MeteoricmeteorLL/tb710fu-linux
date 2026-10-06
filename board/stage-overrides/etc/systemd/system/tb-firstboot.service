@@ -1,0 +1,16 @@
+[Unit]
+Description=TB710FU first-boot setup (machine-id, ssh host keys, hostname)
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=sysinit.target ssh.service
+ConditionPathExists=!/var/lib/tb-firstboot.done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/tb-firstboot.sh
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=sysinit.target

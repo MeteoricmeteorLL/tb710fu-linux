@@ -1,0 +1,11 @@
+# TB710FU Linux rootfs, 20261006
+file:          tb710fu-rootfs-20261006.tar.zst
+size:          2043329593
+sha256:        a1325d30e5b3f70c070895efc7f543d3656bbd5b594894c06f36c0612355d442
+md5:           43ba9352e86c00ab315cbfab51e80c94
+manifest:      tb710fu-rootfs-20261006.manifest.md5 (75175 files)
+kernel:        7.2.0-gcf72cbb39da8-dirty
+built:         2026-10-06T13:37:02+08:00
+verified:      zstd -t; decoded stream identical across two cache drops;
+               tar -d matched the staged tree file by file; secret scan clean
+deploy:        see docs/DEPLOY.md

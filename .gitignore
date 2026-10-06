@@ -1,0 +1,15 @@
+# build artifacts / 编译产物
+*.o
+*.a
+*.cmd
+*.ko
+*.mod
+*.mod.c
+Module.symvers
+modules.order
+built-in.a
+.*.cmd
+
+# the published tarball lives on the releases page, not in git
+tb710fu-rootfs-*.tar.zst
+tb710fu-rootfs-*.tar.zst.part-*
