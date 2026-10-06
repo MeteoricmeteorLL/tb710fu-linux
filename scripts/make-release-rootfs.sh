@@ -65,7 +65,7 @@ EXC=( --one-file-system --warning=no-file-changed
  --exclude=./var/lib/bluetooth --exclude=./var/lib/NetworkManager
  --exclude=./var/lib/fwupd/pki
  --exclude=./var/lib/systemd/coredump --exclude=./var/lib/systemd/random-seed
- --exclude=./var/lib/dbus/machine-id
+ --exclude=./var/lib/dbus/machine-id --exclude=./var/lib/tb-firstboot.done
  --exclude=./usr/share/doc --exclude=./usr/share/man
  --exclude=./etc/netplan --exclude=./etc/machine-id --exclude='./etc/ssh/ssh_host_*'
  --exclude=./etc/NetworkManager/system-connections
@@ -104,6 +104,25 @@ chmod 755 "$STAGE/usr/local/bin/tb-firstboot.sh" "$STAGE/usr/local/bin/tb-wifi-u
 chmod 600 "$STAGE/etc/tb-wifi-credentials.conf" "$STAGE/etc/wpa_supplicant-tb.conf"
 : > "$STAGE/etc/machine-id"
 mkdir -p "$STAGE/var/lib/dbus"; : > "$STAGE/var/lib/dbus/machine-id"
+
+# Ownership.  The tree this packs was first staged on Windows at some point, which
+# left "/" -- and 70-odd paths under it, including /usr and /etc -- owned by uid
+# 197609 instead of root.  systemd then refuses to canonicalize any path below a
+# non-root-owned parent ("unsafe path transition"), so systemd-tmpfiles silently
+# creates nothing: /tmp/.X11-unix never appears, Xwayland cannot make its sockets,
+# and every X11 application fails with "couldn't open display".  The 2 GB image
+# published on 2026-10-06 had exactly this.  Normalize, and refuse to pack if it
+# did not take.
+chown 0:0 "$STAGE"
+if find "$STAGE" -xdev \( -uid 197609 -o -gid 197609 \) -print -quit | grep -q .; then
+    log "    paths owned by uid 197609 found -- normalizing"
+    find "$STAGE" -xdev \( -uid 197609 -o -gid 197609 \) -exec chown 0:0 {} +
+fi
+[ "$(stat -c %u "$STAGE")" = 0 ] || die "staging root is owned by $(stat -c %u "$STAGE"), not root"
+if find "$STAGE" -xdev \( -uid 197609 -o -gid 197609 \) -print -quit | grep -q .; then
+    die "paths owned by uid 197609 survived normalization"
+fi
+log "    ownership normalized (root entry 0:0, no uid-197609 paths)"
 
 for p in etc/ssh/ssh_host_rsa_key var/lib/bluetooth root/.ssh root/.bash_history \
          root/.config/chromium root/.cache etc/NetworkManager/system-connections \
