@@ -37,7 +37,7 @@ Legend / 图例: ✅ works · ⚠️ partial / 部分可用 · ❌ not working /
 | Cellular modem / GNSS | ➖ | This unit is WiFi-only; no modem or GNSS bring-up. / 本机无蜂窝/GNSS |
 | Stylus / 手写笔 | ❓ | Not tried. / 未试 |
 | Virtual keyboard / 虚拟键盘 | ✅ | maliit, wired into kwin's `InputMethod`. / maliit，已接进 kwin |
-| X11 apps / X11 程序 | ✅ | XWayland works, but `/tmp/.X11-unix` lives on tmpfs and must be recreated at boot (`/etc/tmpfiles.d/tb-x11.conf`) — without it `glxgears` reports "no OpenGL". / 依赖 tmpfiles 重建 socket 目录 |
+| X11 apps / X11 程序 | ✅ | Works through XWayland, which needs `/tmp/.X11-unix` to exist. Images packed on or before 2026-10-06 have `/` owned by uid 197609, which makes `systemd-tmpfiles` skip every entry and leaves that directory missing — every X11 app then fails with `couldn't open display`. One-line fix in KNOWN-ISSUES §6; `glxgears` measures 120 FPS. / 通过 XWayland 可用，但它需要 `/tmp/.X11-unix`；2026-10-06 及更早的镜像 `/` 属主错误会让 tmpfiles 全线失效（修法见 KNOWN-ISSUES §6），glxgears 实测 120 FPS |
 | Chromium / VLC | ✅ | Both installed and working (Chromium via a wrapper that adds `--no-sandbox --password-store=basic --ozone-platform=wayland`). / 都能用，Chromium 走包装脚本 |
 | `snap` / `flatpak` | ❌ | `CLONE_NEWUSER` returns `EPERM` even for root on this port, so both are impossible. Use debs. / 用户命名空间不可用，只能用 deb |
 | Desktop / 桌面 | ✅ | Plasma 6 Wayland, SDDM with root auto-login, Chinese UI available, virtual console on `tty1`, battery/backlight/keyboard applets working. / Plasma 6 Wayland + root 自动登录 |
