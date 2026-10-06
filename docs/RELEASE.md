@@ -102,7 +102,7 @@ device's `/lib/firmware` — it is exactly what the port was developed and teste
 on.
 
 The set, and the panel/touch references that go with it, come from
-**[SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)**
+**[SpendyYT](https://github.com/SpendyYT)**
 — credit that author when you pass these on.  / 固件集与面板/触摸参考来自该作者，
 转手或再分发时请一并注明。
 

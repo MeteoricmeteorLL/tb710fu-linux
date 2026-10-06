@@ -151,7 +151,7 @@ LICENSE, .gitattributes
   `cf72cbb39da84b6f02f90c07f33b102fc10b16f0`, plus 49 modified files and a
   handful of new drivers (panel, touch, regulator, audio codec, board DTS).
 * **Panel/touch bring-up and the firmware set for this device come from
-  [SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu).
+  [SpendyYT](https://github.com/SpendyYT).
   Many thanks to that author — without that work this port would not have got a
   picture, a working digitizer, or the right blobs to hand the WCN7850 and the
   ADSP.**
@@ -168,7 +168,7 @@ LICENSE, .gitattributes
   `firmware/README.md`，授权情况与"需要干净授权"的做法见 `docs/RELEASE.md` 第 4 节。
 
 **面板/触摸的点亮工作与这台机器的固件集来自
-[SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)，
+[SpendyYT](https://github.com/SpendyYT)，
 非常感谢这位作者** —— 没有那份工作，这个移植不会有点亮的屏、可用的触摸，也拿不到
 交给 WCN7850 和 ADSP 的正确固件。
 

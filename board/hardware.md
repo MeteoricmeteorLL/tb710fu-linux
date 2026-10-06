@@ -5,12 +5,12 @@ matter more than they look (the boot console's fixed address, the partition
 geometry, the WiFi power rails).
 
 The panel/touch bring-up and the firmware set for this device come from
-**[SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)**
+**[SpendyYT](https://github.com/SpendyYT)**
 — with thanks to that author.
 
 移植过程中攒下的硬件事实汇总。其中几条是"承重"的：绘制控制台的固定地址、分区几何、
 WiFi 供电轨。面板/触摸的点亮工作与这台机器的固件集来自
-**[SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)**，
+**[SpendyYT](https://github.com/SpendyYT)**，
 感谢该作者。
 
 ## Device / 设备

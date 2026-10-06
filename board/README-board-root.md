@@ -1,7 +1,7 @@
 # TB710FU（联想小新 Pad Pro GT / SM8650Q）固件与驱动重建包
 
 > **固件与面板/触摸参考来源**：本包中的固件集与面板/触摸点亮参考来自
-> **[SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)**，
+> **[SpendyYT](https://github.com/SpendyYT)**，
 > 非常感谢该作者的帮助；再分发这些 blob 时请一并注明来源。
 >
 > 本文里的 `board-root/` 就是本仓库的 `board/board-root.tgz`（解包即得该目录；

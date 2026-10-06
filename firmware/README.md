@@ -49,7 +49,7 @@ matching modules.
 These are **proprietary vendor blobs**, extracted from this device's own
 partitions (they are not ours to license, and Qualcomm/Lenovo do not distribute
 them).  The set, and the panel/touch bring-up references that go with it, come
-from **[SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)** —
+from **[SpendyYT](https://github.com/SpendyYT)** —
 credit that author when you pass these on.
 
 If you need a clean licensing story, do not redistribute this archive: use
@@ -58,7 +58,7 @@ inventory and pull the files from your own stock firmware instead.
 
 这些是**厂商私有 blob**，从本机分区里提取（不归我们授权，高通/联想也没有公开分发）。
 这批固件以及配套的面板/触摸点亮参考来自
-**[SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)**，
+**[SpendyYT](https://github.com/SpendyYT)**，
 转手时请注明该作者。
 
 如果你需要一份授权干净的方案，就不要分发这个归档：用
