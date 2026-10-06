@@ -408,6 +408,22 @@ the panel, plus tools/ for post-mortem; `/sys/fs/pstore` (ramoops at
   this image overrides both.
   **root 桌面下的应用**：PipeWire、upower 等带 `ConditionUser=!root` 的用户服务
   默认不启动，镜像里已覆盖。
+* **Electron and Chromium apps under the root session**: they refuse to start and
+  dump core —
+  `FATAL: Running as root without --no-sandbox is not supported` /
+  `status=5/TRAP` — because the Chromium sandbox wants user namespaces, which this
+  kernel refuses (see the `snap` item below).  `/usr/local/bin/chromium` and
+  `/usr/local/bin/qq-start` add `--no-sandbox` (and the X11/Wayland auth bits), but
+  a `.desktop` file that calls the binary path directly bypasses them.  When an app
+  dies on launch, check its `Exec=` and put an override in
+  `/usr/local/share/applications/` (earlier in `XDG_DATA_DIRS`, so it wins) that
+  points at the wrapper.  QQ needed exactly this: `/opt/QQ/qq` → `qq-start`.
+  **root 会话下的 Electron / Chromium 应用**：会直接 `status=5/TRAP`，报
+  `Running as root without --no-sandbox is not supported`（沙箱要用户命名空间，本内核
+  拒绝，见下面 `snap` 那条）。`/usr/local/bin/chromium`、`/usr/local/bin/qq-start`
+  已经加了 `--no-sandbox`，但 `.desktop` 里若直接写二进制路径就会绕过包装脚本——应用一
+  启动就崩时先看它的 `Exec=`，然后把覆盖文件放到 `/usr/local/share/applications/`
+  （XDG 优先级更高）指向包装脚本。QQ 就是这样修好的。
 * **Battery reporting**: `upower` needs its system user and
   `PrivateUsers=no` (see above); without them the battery indicator is empty.
   **电池显示**：`upower` 需要系统用户并关掉 `PrivateUsers`（同因），否则电池图标为空。
