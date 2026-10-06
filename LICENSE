@@ -53,8 +53,7 @@ patches state their origin; keep those notices.
 
 `firmware/`, the firmware inside `board/board-root.tgz` and inside the shipped
 rootfs are proprietary Qualcomm / Lenovo / Novatek / Awinic blobs extracted from
-the device.  They are redistributed here deliberately so the port works out of
-the box, and they come from
+the device.  They come from
 <https://github.com/SpendyYT/linux-firmware-tb710fu> (credit that author).  No
 licence is granted for them by this repository.  If you need a clean licensing
 story, do not redistribute them: `board/README-board-root.md` lists every blob

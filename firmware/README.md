@@ -52,8 +52,7 @@ them).  The set, and the panel/touch bring-up references that go with it, come
 from **[SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)** —
 credit that author when you pass these on.
 
-They are published here deliberately, so that the port works out of the box.  If
-you need a clean licensing story, do not redistribute this archive: use
+If you need a clean licensing story, do not redistribute this archive: use
 `board/README-board-root.md` (which lists every blob with size and md5) as an
 inventory and pull the files from your own stock firmware instead.
 
@@ -62,9 +61,9 @@ inventory and pull the files from your own stock firmware instead.
 **[SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)**，
 转手时请注明该作者。
 
-这里是有意公开的，目的是让移植开箱可用。如果你需要一份授权干净的方案，就不要分发这个
-归档：用 `board/README-board-root.md`（列出每个 blob 的大小与 md5）当清单，改从自己的
-原厂固件里取文件。
+如果你需要一份授权干净的方案，就不要分发这个归档：用
+`board/README-board-root.md`（列出每个 blob 的大小与 md5）当清单，改从自己的原厂固件
+里取文件。
 
 Note also that `kernel/Image.gz` has the GPU firmware built into it
 (`CONFIG_EXTRA_FIRMWARE`), so that binary carries the same caveat.

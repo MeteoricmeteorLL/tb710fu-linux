@@ -6,6 +6,11 @@
 >
 > 本文里的 `board-root/` 就是本仓库的 `board/board-root.tgz`（解包即得该目录；
 > 单独要固件的话用 `firmware/tb710fu-firmware-20261005.tar.gz` + `firmware/MD5SUMS`）。
+>
+> 注意：本文是从原项目工作区原样带过来的清单文档，其中出现的 `PROJECT_STATE.md`、
+> `checksums-*.md5`、`tools/verify-all.sh`、`kernel/recovery_b-*.bin` 等路径属于那个
+> 工作区，本仓库并未包含；本仓库里对应的东西是 `release/`、`tools/`、`kernel/` 下的同名
+> 或相似文件。
 
 **采集时间**：2026-10-05 19:xx
 **采集来源**：平板当前实际运行的系统（不是历史副本）——Ubuntu 26.04.1 LTS，内核

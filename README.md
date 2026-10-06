@@ -33,20 +33,27 @@ commit `2c9e8827`, release [`fbreg-20261006`](https://github.com/MeteoricmeteorL
 
 ## What works / 可用状态
 
+A working Linux tablet, with a few loud gaps: it boots, the panel and touch work,
+the GPU is stable, USB and storage are solid — but **the speakers are silent**,
+WiFi is slow, and suspend/sensors/camera have not been touched.
+
+一台能用的 Linux 平板，但也有几个明显的缺口：能启动、屏幕与触摸可用、GPU 稳定、
+USB 与存储可靠 —— 但**扬声器没有声音**、WiFi 慢，suspend/传感器/相机完全没做。
+
 | | Status / 状态 |
 |---|---|
-| Boot chain (ABL → U-Boot → kernel → rootfs) | **works** / 可用 |
-| Plasma 6 Wayland desktop, Chinese UI, root auto-login | **works** / 可用 |
-| Panel (NT36532 dual-DSI, 3200×2000) | **works**, with a latch-race workaround / 可用（有闩锁竞态绕过） |
-| Touch (Novatek NT36532) | **works** (re-probe service) / 可用 |
-| GPU (Adreno 750 / gen70900) | **works** (IFPC quirk removed) / 可用 |
-| Battery reporting, backlight, virtual keyboard (maliit) | **works** / 可用 |
-| Chromium / VLC / glxgears (XWayland) | **works** (wrappers in `/usr/local/bin`) / 可用 |
+| Boot chain, kernel, panel, touch, GPU, video codec, USB-NCM rescue link, storage | **works** / 可用 |
+| Plasma 6 Wayland desktop, Chinese UI, root auto-login, virtual keyboard, Chromium/VLC | **works** / 可用 |
 | WiFi (WCN7850 / ath12k) | **partial** — associates and DHCPs, poor latency/throughput / 能连能拿地址，延迟吞吐差 |
-| Speakers / audio out | **not working** — no working playback path yet / 通路尚未打通 |
-| Bluetooth | transport up, not verified end to end / 传输层起来了，未端到端验证 |
+| Speakers, microphone | **not working** — no working playback path yet / 通路尚未打通 |
+| Bluetooth | transport up, pairing/audio not verified / 传输层起来了，未端到端验证 |
+| Sensors, camera | **not started** / 未做 · **suspend** untested / 未验证 |
 | `snap` / `flatpak` | **impossible** — `CLONE_NEWUSER` returns `EPERM` / 不可能 |
-| Stability | improved; the memory-corruption crash is fixed, random reboots still open / 已改善，随机重启仍未定位 |
+| Stability | the memory-corruption crash is fixed; random reboots still open / 内存损坏已修，随机重启仍未定位 |
+
+Per-subsystem detail, with what was verified on the device and what was not:
+**`docs/STATUS.md`**. / 每个部位的详细状态（哪些在实机验证过、哪些没有）见
+`docs/STATUS.md`。
 
 ## The one thing to know / 最该知道的一件事
 
@@ -85,12 +92,14 @@ pixel values appearing in our own pages while we watched — is written up in
 
 ```
 docs/
-  DEPLOY.md          from TWRP to a booting desktop / 从 TWRP 到桌面
+  INSTALL.md         install this rootfs, or another distro / 安装教程（两种路径）
+  STATUS.md          what works, part by part / 各部位支持情况
+  DEPLOY.md          partitioning, boot chain, first boot, Android / 部署细节
   KNOWN-ISSUES.md    WiFi, speakers, stability, the memory bug / 已知问题全表
-  ROOTFS.md          deploying a different distribution / 换其他 rootfs
+  ROOTFS.md          what a foreign rootfs must provide / 换 rootfs 的要求
   BUILD-KERNEL.md    rebuild the kernel / 重建内核
   BUILD-UBOOT.md     rebuild U-Boot / 重建 U-Boot
-  RELEASE.md         what to publish, checksums, GitHub / 发布与上传
+  RELEASE.md         what is published, checksums, licensing / 发布与授权
 kernel/
   patches/           TB710FU-full-tree.diff + base commit / 补丁与基线
   sources/           new files the diff does not contain / diff 里没有的新增源码
@@ -116,13 +125,15 @@ release/             the published assets and their checksums
 
 ## Quick start / 快速开始
 
-* **Install it**: `docs/DEPLOY.md` — partitions, U-Boot, `linboot`, rootfs, first
-  boot. / 安装看 `docs/DEPLOY.md`。
-* **Understand the rough edges**: `docs/KNOWN-ISSUES.md`. / 细节看
+* **Install it** — `docs/INSTALL.md`: partitions → U-Boot → `linboot` → rootfs,
+  for this image **and** for another distribution. / 安装看 `docs/INSTALL.md`
+  （本镜像与其他发行版两条路径）。
+* **See what actually works** — `docs/STATUS.md`. / 可用性看 `docs/STATUS.md`。
+* **Understand the rough edges** — `docs/KNOWN-ISSUES.md`. / 细节看
   `docs/KNOWN-ISSUES.md`。
-* **Rebuild anything**: `docs/BUILD-KERNEL.md`, `docs/BUILD-UBOOT.md`. /
+* **Rebuild anything** — `docs/BUILD-KERNEL.md`, `docs/BUILD-UBOOT.md`. /
   重建看这两篇。
-* **Publish/fork it**: `docs/RELEASE.md`. / 发布看 `docs/RELEASE.md`。
+* **Publish/fork it** — `docs/RELEASE.md`. / 发布看 `docs/RELEASE.md`。
 
 ## Lineage and credits / 来源与致谢
 
@@ -137,15 +148,14 @@ release/             the published assets and their checksums
 * U-Boot from the **DanDrewCJ / u-boot-13r** lineage, with the `uart14fix`
   variant (Bluetooth UART left enabled) and the `linboot` boot contract; the
   device-tree byte-swap bug and the `memboot` re-targeting are patched here.
-* Firmware blobs are the vendor's (extracted from the device's own partitions)
-  and are **published here on purpose**, so the port works out of the box: they
-  are in `firmware/` (29 files, `md5sum -c`-verified against the live device),
-  in `board/board-root.tgz` and inside the rootfs.  `firmware/README.md` lists
-  what each blob is for and where it came from; `docs/RELEASE.md` §4 has the
-  provenance and the "I need a clean licence" path. / 固件是厂商的（从设备自身分区
-  提取），**这里是有意公开的**，好让移植开箱可用：在 `firmware/`（29 个文件，与实机
-  逐文件 md5 核对过）、`board/board-root.tgz` 和 rootfs 里都有，来源与授权说明见
-  `firmware/README.md` 与 `docs/RELEASE.md` 第 4 节。
+* Firmware blobs are the vendor's (extracted from the device's own partitions).
+  They are in `firmware/` (29 files, `md5sum -c`-verified against the live
+  device), in `board/board-root.tgz` and inside the rootfs.  `firmware/README.md`
+  lists what each blob is for and where it came from; the licence situation and
+  the "I need a clean licence" path are in `docs/RELEASE.md` §4. / 固件是厂商的
+  （从设备自身分区提取）：在 `firmware/`（29 个文件，与实机逐文件 md5 核对过）、
+  `board/board-root.tgz` 和 rootfs 里都有，每个文件的用途与来源见
+  `firmware/README.md`，授权情况与"需要干净授权"的做法见 `docs/RELEASE.md` 第 4 节。
 
 **面板/触摸的点亮工作与这台机器的固件集来自
 [SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)，

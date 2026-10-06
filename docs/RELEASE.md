@@ -86,34 +86,34 @@ run that produced this tarball:
 [13:36:46]     secret scan clean                       <- artifact: none of the live secrets
 ```
 
-## 4. Firmware: published, with its provenance / 固件：已发布，并注明来源
+## 4. Firmware in this repository / 本仓库中的固件
 
 `board/board-root.tgz`, `firmware/tb710fu-firmware-20261005.tar.gz` and the
 shipped rootfs all contain the **vendor firmware**: Qualcomm ADSP/CDSP/GPU
 (`qcom/sm8650/xiaoxin/gt/*`), the WLAN BDF and firmware
 (`ath12k/WCN7850/hw2.0/*`), the Novatek touch firmware and the AW882xx
-parameters.  These are proprietary blobs extracted from this device's own
-partitions, published here **deliberately** so that the port is usable out of the
-box.  The 29-file set was verified with `md5sum -c` against the live device's
-`/lib/firmware`, so it is exactly what the port was developed and tested on.
+parameters.  They are proprietary blobs extracted from this device's own
+partitions, and the 29-file set was verified with `md5sum -c` against the live
+device's `/lib/firmware` — it is exactly what the port was developed and tested
+on.
 
 The set, and the panel/touch references that go with it, come from
 **[SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)**
 — credit that author when you pass these on.  / 固件集与面板/触摸参考来自该作者，
 转手或再分发时请一并注明。
 
-If someone downstream needs a clean licensing story, point them at
+No licence is granted for these blobs by this repository (`LICENSE` §4).  If
+someone downstream needs a clean licensing story, point them at
 `board/README-board-root.md` (every blob with size and md5) and
 `firmware/MD5SUMS`: they can pull the same files from their own stock firmware.
-`firmware/README.md` says all of this in one place.
+`firmware/README.md` says all of this in one place.  / 本仓库不对这些 blob 授予
+任何授权（见 `LICENSE` 第 4 节）；需要干净授权的下游按上面两份清单从自己的原厂固件取。
 
-One more place the blobs hide: `kernel/Image.gz` has the GPU firmware **built
-into it** (`CONFIG_EXTRA_FIRMWARE`), which is deliberate — the panel needs it
-before the rootfs is even mounted.  If you want a blob-free kernel, clear
-`CONFIG_EXTRA_FIRMWARE`, rebuild, and put those files under `/lib/firmware` on the
-device instead. / 还有一处：`kernel/Image.gz` 里**内建了 GPU 固件**
-（`CONFIG_EXTRA_FIRMWARE`，为了让面板在 rootfs 挂载前就亮）。若想要不含 blob 的
-内核，清掉该配置重编，把这些文件改为放到板上的 `/lib/firmware`。
+One more place they appear: `kernel/Image.gz` has the GPU firmware **built into
+it** (`CONFIG_EXTRA_FIRMWARE`), because the panel needs it before the rootfs is
+even mounted.  Clear that config and rebuild if you want a blob-free kernel. /
+还有一处：`kernel/Image.gz` 里**内建了 GPU 固件**（`CONFIG_EXTRA_FIRMWARE`，因为面板
+需要在 rootfs 挂载前就亮）。想要不含 blob 的内核就清掉该配置重编。
 
 **不要发布第三方 recovery（TWRP）的文件**：本仓库不含、也不托管任何 recovery 镜像，
 `docs/DEPLOY.md` 只说"自行准备"。  / Do not publish third-party recovery (TWRP)
