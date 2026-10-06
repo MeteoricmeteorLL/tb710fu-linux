@@ -398,11 +398,11 @@ the panel, plus tools/ for post-mortem; `/sys/fs/pstore` (ramoops at
   `99-nodns.conf` (`dns=none`) plus `tb-timesync.service` handle it.
   **时间可能停在 1970**：NM 会把 `/etc/resolv.conf` 覆盖成空文件，时间不对 DNS 就
   坏。已用 `99-nodns.conf`（`dns=none`）+ `tb-timesync.service` 处理。
-* **X11 apps**: XWayland needs `/tmp/.X11-unix`, which is a tmpfs here and
-  vanishes on boot; `/etc/tmpfiles.d/tb-x11.conf` creates it.  Without it
-  `glxgears` and friends fail with "no OpenGL".
-  **X11 程序**：`glxgears` 报 "没有 OpenGL" 是因为 `/tmp/.X11-unix` 在 tmpfs 上
-  开机丢失，已由 `/etc/tmpfiles.d/tb-x11.conf` 补回。
+* **X11 apps**: everything X11 needs XWayland, which needs `/tmp/.X11-unix`;
+  when that directory is missing, `glxgears` reports `couldn't open display`.
+  §6 explains the ownership bug that used to keep it from being created.
+  **X11 程序**：X11 程序都依赖 XWayland 与 `/tmp/.X11-unix`，目录缺失时 `glxgears`
+  报 `couldn't open display`。之前让它建不出来的属主问题见 §6。
 * **Root desktop apps**: the session runs as root, so user services that
   hard-code `ConditionUser=!root` (PipeWire, upower) do not start by default;
   this image overrides both.
@@ -411,3 +411,74 @@ the panel, plus tools/ for post-mortem; `/sys/fs/pstore` (ramoops at
 * **Battery reporting**: `upower` needs its system user and
   `PrivateUsers=no` (see above); without them the battery indicator is empty.
   **电池显示**：`upower` 需要系统用户并关掉 `PrivateUsers`（同因），否则电池图标为空。
+
+---
+
+## 6. X11 applications cannot start: `/` owned by a non-root uid / X11 程序起不来：根目录属主不是 root
+
+### Symptom / 现象
+
+Wayland 会话本身正常（`plasmashell`、`kwin_wayland` 都在跑），GPU 也正常，但任何
+X11 程序都打不开：
+
+```
+$ glxgears
+Error: couldn't open display (null)
+$ DISPLAY=:0 glxinfo -B
+Error: unable to open display :0
+```
+
+XWayland 根本没起来，`kwin_wayland_wrapper` 在会话启动时就报了：
+
+```
+kwin_wayland_wrapper: Failed to create Xwayland connection sockets
+```
+
+### Root cause / 根因
+
+`/tmp/.X11-unix` 不存在。它本该由 `systemd-tmpfiles` 创建（发行版的 `x11.conf`，以及
+本项目的 `/etc/tmpfiles.d/tb-x11.conf`），但 `systemd-tmpfiles --create` 直接拒绝：
+
+```
+Detected unsafe path transition / (owned by 197609) → /var (owned by root)
+```
+
+`/` 以及它下面 70 多个路径（`/usr`、`/etc`、`/etc/systemd`…）的属主是 **uid 197609**
+——Windows 打包机留下的 uid——而不是 root。systemd 拒绝规范化"父目录不属于 root"的
+路径，于是**所有** tmpfiles 条目都静默失效：不只是 X 的 socket 目录，还有
+`/var/run/utmp`（所以 sddm 会报 `Failed to write utmpx`）等。
+
+这是打包环节的问题，不是驱动的问题：已发布的 `tb710fu-rootfs-20261006.tar.zst` 里
+`./`、`./etc/`、`./usr/` 的属主就是 `197609/197609`。已修在
+`scripts/make-release-rootfs.sh`：打包前归一化属主，并且不通过就直接失败。
+
+### Fix / 修法
+
+已经装了旧镜像的系统，执行一次：
+
+```
+chown 0:0 /
+find / -xdev \( -uid 197609 -o -gid 197609 \) -exec chown 0:0 {} +
+systemd-tmpfiles --create
+mkdir -p -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
+systemctl restart sddm
+```
+
+之后 XWayland 会自己起来，`glxinfo -B` 报 `freedreno` / `FD750` /
+`direct rendering: Yes`，`glxgears` 实测 120 FPS（同步到 120Hz 面板）。
+
+2026-10-06 之后打包的镜像由 `tb-firstboot.sh` 在首次开机时自动做这件事。
+
+### Check / 自检
+
+```
+stat -c '%u:%g %n' /        # 必须是 0:0
+ls -ld /tmp/.X11-unix       # 必须存在，1777
+pgrep -a Xwayland           # 会话起来后应该有
+```
+
+### Not a GPU problem / 这不是 GPU 的问题
+
+`glxgears` 在 Wayland 会话里本来就只能靠 XWayland 跑。要测 GPU，用
+`eglinfo`（Wayland 平台会报 `FD750`）、`vkcube`（`Turnip Adreno (TM) 750`）或
+`kmscube`；这台上 Adreno/freedreno 一直是好的。
