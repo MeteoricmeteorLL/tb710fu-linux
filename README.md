@@ -47,7 +47,7 @@ suspend/传感器/相机完全没做。
 |---|---|
 | Boot chain, kernel, panel, touch, GPU, video codec, USB-NCM rescue link, storage | **works** / 可用 |
 | Plasma 6 Wayland desktop, Chinese UI, root auto-login, virtual keyboard, Chromium/VLC | **works** / 可用 |
-| WiFi (WCN7850 / ath12k) | **partial** — associates and DHCPs, poor latency/throughput / 能连能拿地址，延迟吞吐差 |
+| WiFi (WCN7850 / ath12k) | **partial, and a crash hazard** — associates and DHCPs, poor latency/throughput, and the driver has hung this board (loaded on demand because of it: `KNOWN-ISSUES.md` §2) / 能连能拿地址但延迟吞吐差；**且驱动把本机搞死过**（因此按需加载，见 §2） |
 | Speaker output | **works, badly distorted** — crackling/clipping at any volume / 能出声但很炸（严重失真） |
 | Microphone | **untested** / 未验证 |
 | Bluetooth | transport up; **audio tested with headphones only** / 传输层可用；音频只测过耳机 |
