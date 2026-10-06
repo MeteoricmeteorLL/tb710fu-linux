@@ -542,3 +542,48 @@ powered-off board (no device at all) or a live one (a normal descriptor).
 > "death" was a brown-out.
 > 口诀：怀疑"卡死"时先看供电和 journal —— 我们遇到的"WiFi 崩溃"有一次是干净重启，
 > 有一次是掉电。
+
+## 10. Root filesystem packaging / rootfs 打包
+
+**A wrong uid on `/` silently breaks the whole desktop.** The image published on
+2026-10-06 carried `./`, `./etc/` and `./usr/` as `197609/197609` — the uid of the
+Windows machine the tree had been staged on — instead of root. systemd refuses to
+canonicalize any path below a non-root-owned parent:
+
+```
+systemd-tmpfiles[1504]: Detected unsafe path transition / (owned by 197609) -> /var (owned by root)
+```
+
+so **every** tmpfiles entry did nothing, quietly: `/tmp/.X11-unix` never appeared,
+`kwin_wayland_wrapper` logged `Failed to create Xwayland connection sockets`, and
+every X11 program — `glxgears` included — died with `couldn't open display`.  The
+same failure also removes `/var/run/utmp` (sddm logs `Failed to write utmpx`).
+Adding your own tmpfiles config does **not** fix it: it is skipped for the same
+reason, which is exactly how an earlier "fix" here turned out to do nothing.
+
+**Check a packaged image before shipping it:**
+
+```
+zstd -dc tb710fu-rootfs-*.tar.zst | tar -tv --numeric-owner | head -3   # ./ must be 0/0
+stat -c '%u:%g %n' /                                                    # on the device
+```
+
+**Fix a running system** (the session restart at the end is what brings Xwayland up):
+
+```
+chown 0:0 /
+find / -xdev \( -uid 197609 -o -gid 197609 \) -exec chown 0:0 {} +
+systemd-tmpfiles --create
+systemctl restart sddm
+```
+
+`scripts/make-release-rootfs.sh` now normalizes ownership before packing and
+refuses to write a tarball when it did not take, and `tb-firstboot.sh` repeats the
+fix on first boot, so images packed before that date heal themselves.
+
+> Rule of thumb: uid and gid are part of the payload, and a wrong one can disable a
+> whole subsystem without a single error message.  When something systemd owns
+> "silently did nothing", grep its log for "unsafe path transition" before blaming
+> the subsystem itself.
+> 口诀：uid/gid 也是内容的一部分，错一个就能让整个子系统静默失效。systemd 管的目录
+> "悄悄没做"，先在日志里找 "unsafe path transition"，再怀疑子系统。
