@@ -17,6 +17,22 @@ what gets unpacked onto the `linsys` partition.
 > `docs/ROOTFS.md`（换发行版时系统必须提供什么）· `docs/KNOWN-ISSUES.md`（先读）·
 > `docs/STATUS.md`（各部位可用性）
 
+**Starting from a stock tablet?**  Do `docs/INSTALL-FROM-ZERO.md` first: it covers
+unlocking the bootloader, getting a recovery shell, and backing up the stock
+partitions — which this document assumes you already have.
+
+**如果机器还是原厂状态**，请先走 `docs/INSTALL-FROM-ZERO.md`：那里讲解锁引导程序、
+拿到带 `dd` 的 shell、以及**先备份原厂分区**；这些本文默认你已经具备。
+
+Two different shells appear below, and they are not the same thing:
+
+下面会出现两种 shell，别混淆：
+
+| shell | what it is / 是什么 |
+|---|---|
+| **recovery shell** | a third-party recovery (TWRP or similar) you boot or flash yourself; it has `adb` and `dd`.  Not shipped here. / 你自行启动或刷入的第三方 recovery（TWRP 等），有 `adb` 和 `dd`；本仓库不提供 |
+| **rescue console** | the shell in this port's **initramfs**, on USB NCM at `192.168.7.2` (`nc 4444` / `telnet 4445`); it works even when the rootfs is missing or broken, and `/boot` there is the `linboot` partition. / 本移植 **initramfs** 里的救援控制台，走 USB NCM（`192.168.7.2`），rootfs 坏了也能用，里面 `/boot` 就是 `linboot` 分区 |
+
 ---
 
 ## 0. What you need / 准备
@@ -26,7 +42,7 @@ what gets unpacked onto the `linsys` partition.
 | `release/linboot-20261006.img` (32 MiB) | kernel + initramfs + DTB slot image |
 | `uboot/boot_b-linboot-v3.img` (615 KB) | U-Boot for `boot_b` |
 | `release/tb710fu-rootfs-20261006.tar.zst` (2.0 GB) | path A: the root filesystem (GitHub release asset) |
-| `release/CHECKSUMS.txt`, `...manifest.md5` | verify the download (§7) |
+| `release/CHECKSUMS.txt`, the manifest | verify the download (§6) |
 | `board/board-root.tgz` (42 MB) | path B: firmware + modules + board configs + services |
 | `firmware/tb710fu-firmware-*.tar.gz` (37 MB) | path B: just the vendor blobs |
 | a recovery giving you a shell with `dd` and `adb` | **not shipped here** — bring your own |
@@ -100,7 +116,7 @@ mkfs.ext4 -L linsys -m 1 /dev/block/by-name/linsys
 mkdir -p /mnt/linsys && mount /dev/block/by-name/linsys /mnt/linsys
 ```
 
-## Path A — install this repository's rootfs / 安装本仓库的 rootfs
+### 3A — install this repository's rootfs / 安装本仓库的 rootfs
 
 ```sh
 cd /mnt/linsys
@@ -131,7 +147,7 @@ reboot        # from a cold start: hold power ~15 s, then power on
    `systemctl start tb-wifi.service`.  First association after a cold boot takes
    ~110 s because `phy0` only appears then; see `docs/STATUS.md` for how slow it is.
 
-## Path B — another rootfs / another distribution
+### 3B — another rootfs / another distribution
 
 The initramfs does not care which distribution it finds.  It looks for the GPT
 partition named `linsys`, mounts it read-write as **ext4**, and if
@@ -196,16 +212,16 @@ Android reformats `userdata` on its first boot.  The Linux side stays where it i
 |---|---|---|
 | nothing, not even U-Boot | `boot_b` write failed | re-flash it (§2); compare md5 |
 | U-Boot runs, kernel never starts | DTB malformed / wrong linboot window | restore a known-good DTB (`dd ... seek=6144`) |
-| backlight on, no picture | panel latch race | `tb-panel-cycle` (from the rescue shell or ssh); the shipped service does it every boot |
+| backlight on, no picture | panel latch race | `tb-panel-cycle` (from the rescue console or ssh); the shipped service does it every boot |
 | kernel text, then black | console vs compositor | `systemctl stop tb-console-quiet.service` to get the log back on the panel |
-| rescue shell only | `linsys` not ext4 / no `/etc/os-release` | redo §3; that is the deliberate fallback |
+| rescue console only | `linsys` not ext4 / no `/etc/os-release` | redo §3; that is the deliberate fallback |
 | boots, then freezes | see `docs/KNOWN-ISSUES.md` §4 | check `/sys/fs/pstore` and the previous boot's lines on the panel |
 
-The rescue shell is the thing to rely on: it lives in the initramfs, on USB NCM,
+The rescue console is the thing to rely on: it lives in the initramfs, on USB NCM,
 independent of the rootfs — from there `/boot` is the `linboot` partition, so you
 can replace the kernel or DTB without a PC-side flasher.
 
-救援 shell 是兜底手段：在 initramfs 里、走 USB NCM、不依赖 rootfs；在它里面 `/boot`
+救援控制台 是兜底手段：在 initramfs 里、走 USB NCM、不依赖 rootfs；在它里面 `/boot`
 就是 `linboot` 分区，可以不带电脑直接换内核或 DTB。
 
 ## 6. Verify your download / 校验下载

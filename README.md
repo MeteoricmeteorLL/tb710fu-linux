@@ -91,24 +91,25 @@ pixel values appearing in our own pages while we watched — is written up in
 ## Repository layout / 仓库结构
 
 ```
-docs/
-  INSTALL.md         install this rootfs, or another distro / 安装教程（两种路径）
+docs/                       (9 documents / 共 9 篇)
+  INSTALL-FROM-ZERO.md  stock tablet → Linux: unlock, recovery shell, backups
+  INSTALL.md         install this rootfs, or another distro / 安装教程（两条路径）
   STATUS.md          what works, part by part / 各部位支持情况
   DEPLOY.md          partitioning, boot chain, first boot, Android / 部署细节
   KNOWN-ISSUES.md    WiFi, speakers, stability, the memory bug / 已知问题全表
   ROOTFS.md          what a foreign rootfs must provide / 换 rootfs 的要求
   BUILD-KERNEL.md    rebuild the kernel / 重建内核
   BUILD-UBOOT.md     rebuild U-Boot / 重建 U-Boot
-  RELEASE.md         what is published, checksums, licensing / 发布与授权
+  RELEASE.md         publishing, checksums, licensing / 发布与授权
 kernel/
-  patches/           TB710FU-full-tree.diff + base commit / 补丁与基线
-  sources/           new files the diff does not contain / diff 里没有的新增源码
+  patches/           TB710FU-full-tree.diff (49 files) + base commit / 补丁与基线
+  sources/           new files the diff does not carry / diff 里没有的新增源码
   config             the .config of the shipped kernel
   Image.gz           the kernel inside the linboot image
-  dtb/               the fixed device tree blob + how it was produced
+  dtb/               the fixed device tree blob, and the one from before the fix
 uboot/
   patches/           the uart14fix lineage patches, incl. the byte-swap fix
-  boot_b-linboot-v3.img
+  config, boot_b-linboot-v3{,-fbreg}.img, u-boot-13r-src-*.tar.gz
 board/
   stage-overrides/   sanitized files the release image substitutes
   board-root.tgz     firmware + modules + configs + services (extract at /)
@@ -120,11 +121,15 @@ firmware/
   MD5SUMS, README.md          what is inside, provenance, licence note
 tools/               the surgical tools (GPT, DTB, U-Boot, initramfs, probes)
 scripts/             make-release-rootfs.sh, verify-rootfs.sh
-release/             the published assets and their checksums
+release/             SHA256SUMS, CHECKSUMS.txt, manifest, linboot image
+LICENSE, .gitattributes
 ```
 
 ## Quick start / 快速开始
 
+* **Start from a stock tablet** — `docs/INSTALL-FROM-ZERO.md`: unlock, get a
+  recovery shell, back up the stock partitions. / 从原厂机器开始看
+  `docs/INSTALL-FROM-ZERO.md`（解锁、拿 shell、先备份）。
 * **Install it** — `docs/INSTALL.md`: partitions → U-Boot → `linboot` → rootfs,
   for this image **and** for another distribution. / 安装看 `docs/INSTALL.md`
   （本镜像与其他发行版两条路径）。
@@ -138,7 +143,7 @@ release/             the published assets and their checksums
 ## Lineage and credits / 来源与致谢
 
 * Linux **7.2.0** mainline, base commit
-  `cf72cbb39da84b6f02f90c07f33b102fc10b16f0`, plus 47 modified files and a
+  `cf72cbb39da84b6f02f90c07f33b102fc10b16f0`, plus 49 modified files and a
   handful of new drivers (panel, touch, regulator, audio codec, board DTS).
 * **Panel/touch bring-up and the firmware set for this device come from
   [SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu).
@@ -162,7 +167,8 @@ release/             the published assets and their checksums
 非常感谢这位作者** —— 没有那份工作，这个移植不会有点亮的屏、可用的触摸，也拿不到
 交给 WCN7850 和 ADSP 的正确固件。
 
-Licensing / 授权: scripts and tools here are **MIT**; the documentation is
+Licensing / 授权 — see **`LICENSE`**: scripts and tools **MIT**; documentation
 **CC BY-SA 4.0**; the kernel and U-Boot changes follow their upstream licences
-(GPL-2.0).  Vendor firmware is not ours to license. / 脚本与工具 MIT，文档
-CC BY-SA 4.0，内核与 U-Boot 改动遵循上游 GPL-2.0，厂商固件不归我们授权。
+(GPL-2.0); the vendor firmware is not ours to license. / 授权细则见 `LICENSE`：
+脚本与工具 MIT，文档 CC BY-SA 4.0，内核与 U-Boot 改动遵循上游 GPL-2.0，厂商固件不归
+我们授权。

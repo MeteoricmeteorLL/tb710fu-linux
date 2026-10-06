@@ -1,14 +1,22 @@
-# Deployment / 部署教程
+# Deployment reference / 部署参考
 
-From TWRP to a booting Plasma desktop.  Every command is what was actually run
-on the device; the numbers are for a 256 GB TB710FU with a 4096-byte-logical-
-sector UFS (`/dev/sda`, 61 390 843 sectors).
+From a recovery shell to a booting Plasma desktop.  Every command here was run on
+the device; the numbers are for a 256 GB TB710FU with a 4096-byte-logical-sector
+UFS (`/dev/sda`, 61 390 843 sectors).
 
-从 TWRP 到能起 Plasma 桌面。下面每条命令都是在实机上跑过的；数值对应 256GB
+从 recovery shell 到能起 Plasma 桌面。下面每条命令都是在实机上跑过的；数值对应 256GB
 TB710FU 的 UFS（逻辑扇区 4096 字节，`/dev/sda`，共 61 390 843 个扇区）。
 
+**Scope / 定位**: this is the *reference* — partition numbers, the reason for each
+step, the way back to Android, and the failure table.  For a step-by-step
+walkthrough start with `docs/INSTALL-FROM-ZERO.md` (stock device) or
+`docs/INSTALL.md` (already unlocked; two install paths).
+
+本文是**参考文档**：分区数值、每一步的原因、回安卓的方法、故障排查表。要按步骤跟着做，
+请看 `docs/INSTALL-FROM-ZERO.md`（原厂机器）或 `docs/INSTALL.md`（已解锁，两条安装路径）。
+
 Read `docs/KNOWN-ISSUES.md` first — in particular the memory-corruption item, and
-make sure the DTB you install has the three `reserved-memory` nodes.
+make sure the DTB you install carries the three `reserved-memory` nodes.
 
 请先读 `docs/KNOWN-ISSUES.md`（尤其是内存损坏那一条），并确认你要装的 DTB 带上了
 三个 `reserved-memory` 节点。
@@ -29,12 +37,12 @@ make sure the DTB you install has the three `reserved-memory` nodes.
 
 Boot chain: `ABL → boot_b (U-Boot) → memboot from linboot (kernel + initramfs +
 DTB) → initramfs mounts linsys and switch_roots → systemd → SDDM (root auto-login)
-→ Plasma 6 Wayland`.  The initramfs also brings up a rescue shell on USB NCM
+→ Plasma 6 Wayland`.  The initramfs also brings up a rescue console on USB NCM
 (board `192.168.7.2`, host `192.168.7.1`, `nc 4444` / `telnet 4445`).
 
 启动链：`ABL → boot_b (U-Boot) → 从 linboot 加载内核/initramfs/DTB → initramfs
 挂 linsys 并 switch_root → systemd → SDDM（root 自动登录）→ Plasma 6 Wayland`。
-initramfs 还会在 USB NCM 上开一个救援 shell（板 192.168.7.2 / 主机 192.168.7.1，
+initramfs 还会在 USB NCM 上开一个救援控制台（板 192.168.7.2 / 主机 192.168.7.1，
 `nc 4444` / `telnet 4445`）。
 
 ## 1. Files you need / 需要的文件
@@ -105,7 +113,7 @@ sync
 md5sum /dev/block/by-name/boot_b    # compare with the image you wrote (first 614800 bytes)
 ```
 
-`boot_a` keeps the stock Android kernel on purpose: switching back to Android is
+`boot_a` keeps the stock Android kernel by design: switching back to Android is
 a matter of setting the active slot again (§7).  Do **not** write U-Boot to
 `boot_a`.
 
@@ -202,12 +210,12 @@ set_active b` brings Linux back.
 |---|---|---|
 | nothing at all, no U-Boot | `boot_b` write failed | re-flash U-Boot (§3); check with `md5sum` |
 | U-Boot runs, kernel never gets there | DTB malformed / linboot window wrong | restore the previous DTB: `dd if=<backup> of=/dev/block/by-name/linboot bs=4096 seek=6144 conv=fsync` |
-| backlight on, no picture | panel latch race | from the rescue shell (or ssh): `/usr/local/bin/tb-panel-cycle`; the shipped `tb-panel-cycle.service` does this at every boot |
+| backlight on, no picture | panel latch race | from the rescue console (or ssh): `/usr/local/bin/tb-panel-cycle`; the shipped `tb-panel-cycle.service` does this at every boot |
 | text on screen, then black | compositor/console fight | `systemctl stop tb-console-quiet.service` to put kernel logs back on the panel |
 | it boots, then freezes after a while | see `docs/KNOWN-ISSUES.md` §4 | check `/sys/fs/pstore` and the previous boot's lines on the panel |
-| rescue shell only (no rootfs) | `linsys` not ext4 / missing `/etc/os-release` | redo §5; the init falls back deliberately when that file is absent |
+| rescue console only (no rootfs) | `linsys` not ext4 / missing `/etc/os-release` | redo §5; the init falls back by design when that file is absent |
 
-The rescue shell is the thing to rely on: it is in the initramfs, on USB NCM,
+The rescue console is the thing to rely on: it is in the initramfs, on USB NCM,
 independent of the root filesystem.  From there `/boot` is the `linboot`
 partition, so you can replace the kernel or DTB without a PC-side flasher.
 

@@ -2,10 +2,11 @@
 
 Everything below was observed on real hardware (Lenovo Xiaoxin Pad Pro GT,
 TB710FU, SM8650Q).  Nothing here is theoretical — each item says how it was
-diagnosed and what to do about it.
+diagnosed and what to do about it.  For a one-line-per-part summary instead, see
+`docs/STATUS.md`.
 
 下面每一条都是在实机（联想小新 Pad Pro GT / TB710FU / SM8650Q）上实测到的现象，
-附诊断依据和处理办法。
+附诊断依据和处理办法。想要"每个部位一行"的总览，见 `docs/STATUS.md`。
 
 ---
 
@@ -166,16 +167,25 @@ Cost: 27 MiB of the 7 GiB, once.
 `/memory` 节点，它本来就用 `cpu_to_fdt64()` 做对了 —— 所以 framebuffer 节点是唯一一处
 有这个 bug 的地方。代价是 7GiB 里占掉 27MiB。
 
-### Until it is applied / 修复前的临时做法
+### If your image does not have the fix / 如果你的镜像还没有这个修复
 
-Anything that writes slices larger than ~2 GiB must be verified, not trusted:
-`zstd -t` on the artifact, and hash the file twice with a cache drop in between
-(`echo 3 > /proc/sys/vm/drop_caches`).  `scripts/make-release-rootfs.sh` does
-exactly this and retries — that is why it takes a few passes to produce the
-shipped tarball.
+Check first:
 
-大于约 2GiB 的写入必须校验而不能信任：`zstd -t`，以及 drop 缓存前后各算一次哈希。
-`scripts/make-release-rootfs.sh` 就是这么做的（并且会自动重试）。
+```sh
+dmesg | grep 'reserved mem.*framebuffer'    # expect: ... map non-reusable framebuffer@d5100000
+grep -A1 'd5100000' /proc/iomem             # expect a "reserved" child inside System RAM
+```
+
+If that shows nothing, install a DTB with the three nodes (`docs/BUILD-KERNEL.md`
+§4).  Until you do, treat every write larger than ~2 GiB as untrusted: verify it
+rather than believing it — `zstd -t` on an artifact, and hash the file twice with
+a cache drop in between (`echo 3 > /proc/sys/vm/drop_caches`).  That is exactly
+what `scripts/make-release-rootfs.sh` does, and why it retries.
+
+先按上面两条确认。若什么都没有，就换成带那三个节点的 DTB（见
+`docs/BUILD-KERNEL.md` 第 4 节）。在那之前，把大于约 2GiB 的写入都当作不可信的：
+`zstd -t` 校验产物，并在 drop 缓存前后各算一次哈希 —— `scripts/make-release-rootfs.sh`
+就是这么做的（并且会自动重试）。
 
 ---
 

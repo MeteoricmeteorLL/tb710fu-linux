@@ -13,7 +13,7 @@ Legend / 图例: ✅ works · ⚠️ partial / 部分可用 · ❌ not working /
 | Part / 部位 | | Notes / 说明 |
 |---|---|---|
 | Boot chain / 启动链 | ✅ | ABL → `boot_b` (U-Boot) → `linboot` slot (kernel + initramfs + DTB) → `linsys` rootfs → systemd → SDDM → Plasma. Cold boot to desktop ~40–60 s. / 冷启动到桌面约 40–60 秒 |
-| Kernel / 内核 | ✅ | mainline **7.2.0** (`7.2.0-gcf72cbb39da8-dirty`), 49 files changed + new drivers. `/proc/version` matches `kernel/`'s patch. / 主线 7.2.0，49 个文件改动 |
+| Kernel / 内核 | ✅ | mainline **7.2.0** (`7.2.0-gcf72cbb39da8-dirty`), 49 files changed plus new drivers; `kernel/Image.gz` is byte-identical to the running kernel. / 主线 7.2.0，49 个文件改动；`kernel/Image.gz` 与实机运行的内核逐字节相同 |
 | Panel / 面板 | ✅ | Novatek NT36532 dual-DSI 3200×2000, DSC. **Latch race**: sometimes lit but blank on a cold boot — `tb-panel-cycle.service` does a real DRM off/on before SDDM and fixes it. / 冷启动偶发"有背光无画面"，已用 DRM off/on 服务绕过 |
 | Backlight / 背光 | ✅ | `sy7758` over I²C, brightness slider works. / 亮度可调 |
 | Touch / 触摸 | ✅ | Novatek NT36532 over SPI (`nvt_36xxx`, out of tree). The DSI reset makes the SPI probe fail on some cold boots — `tb-touch-rebind.service` re-binds it. / 冷启动偶发探测失败，已有重新 bind 服务 |
@@ -24,7 +24,7 @@ Legend / 图例: ✅ works · ⚠️ partial / 部分可用 · ❌ not working /
 | Bluetooth audio / 蓝牙音频 | ❓ | PipeWire's user units are configured for a root session; not verified end to end. / 已为 root 会话配好 PipeWire，未端到端验证 |
 | WiFi | ⚠️ | WCN7850 / `ath12k` associates and gets a lease (`phy0` only appears ~110 s after a cold boot). Latency sawtooths 200–700 ms, rx bitrate 65–104 Mbps at −25 dBm, and RX needs host TX keepalive (`tb-wifi-kick`). On-demand by design. Details: KNOWN-ISSUES §2. / 能连能拿地址，但延迟抖动、速率低，且需要主机发送保活 |
 | Bluetooth | ⚠️ | Transport up: `hci_uart` on `uart14` (the `uart14fix` U-Boot lineage), firmware loads. Pairing/audio untested. / 传输层可用（uart14 需保留），配对与音频未验证 |
-| USB device (NCM) | ✅ | The gadget gives the rescue link: board `192.168.7.2`, host `192.168.7.1`, `ssh`, `nc 4444`, `telnet 4445`. This is the lifeline when there is no display. / 救援信道，无显示时的唯一入口 |
+| USB device (NCM) | ✅ | The gadget carries the rescue console: board `192.168.7.2`, host `192.168.7.1`, `ssh`, `nc 4444`, `telnet 4445`. This is the lifeline when there is no display. / 救援控制台走这条链路，没有显示时它是唯一入口 |
 | USB host / OTG | ⚠️ | An OTG keyboard was used during bring-up. Host mode from the running desktop is not verified. / 点亮阶段用过 OTG 键盘，桌面下的 host 模式未验证 |
 | Storage / 存储 | ✅ | UFS 256 GB, 4096-byte logical sectors, ext4 root. Two harmless `vdd-hba`/`vccq2` regulator warnings. The boot framebuffer reservation is fixed, so large files are no longer corrupted (KNOWN-ISSUES §1). / 大文件静默损坏已修 |
 | Battery reporting / 电量显示 | ⚠️ | `upower` shows it (needs its system user and `PrivateUsers=no` under a root session). `qcom_battmgr` intermittently logs `-110` on some properties. / 图标可用，个别属性偶发 -110 |

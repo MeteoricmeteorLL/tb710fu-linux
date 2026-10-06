@@ -1,8 +1,8 @@
 # The board / 硬件速查
 
 Facts gathered while bringing this port up, in one place, because several of them
-are load-bearing (the drawing console's fixed address, the partition geometry,
-the WiFi power rails).
+matter more than they look (the boot console's fixed address, the partition
+geometry, the WiFi power rails).
 
 The panel/touch bring-up and the firmware set for this device come from
 **[SpendyYT/linux-firmware-tb710fu](https://github.com/SpendyYT/linux-firmware-tb710fu)**

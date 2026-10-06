@@ -11,16 +11,20 @@ squashfs+overlay path, so a half-written rootfs fails safe.
 `linboot` 挂到 `/boot`；没有那个文件就回落到旧的 squashfs+overlay 路径，所以写坏的
 rootfs 不会变砖。
 
-That means “deploy another distro” is: **mkfs, extract, add the board bits below.**
+That means “deploy another distro” is: **mkfs, extract, add the board bits below** — the
+commands for that are in `docs/INSTALL.md` §3B; this document is what such a system
+has to provide, and what cannot work on this port at all.
 
-所以“换个发行版”就是：**格式化、解包、补上下面这些板级内容。**
+所以“换个发行版”就是：**格式化、解包、补上下面这些板级内容** —— 具体命令在
+`docs/INSTALL.md` 第 3B 节；本文讲的是这样一个系统必须提供什么，以及哪些东西在本移植上
+根本做不到。
 
 ---
 
 ## 1. The minimum / 最低要求
 
 ```sh
-# from a recovery shell or the rescue shell
+# from a recovery shell or the rescue console
 mkfs.ext4 -L linsys /dev/block/by-name/linsys
 mount /dev/block/by-name/linsys /mnt
 # e.g. an Ubuntu/Debian base or cloud image, or a distro bootstrap
@@ -79,7 +83,7 @@ tarball):
 * serial console on the panel via `console=tbfb` (the kernel draws the boot log
   into the framebuffer at `0xD5100000` — see `KNOWN-ISSUES.md` §1, and make sure
   your DTB reserves it);
-* the USB NCM gadget gives the rescue shell at `192.168.7.2`; that link is what
+* the USB NCM gadget gives the rescue console at `192.168.7.2`; that link is what
   you use when there is no network and no display;
 * `tb-*` scripts assume `busybox` (udhcpc), `iw`, `wpa_supplicant`, `rfkill`;
 * the root account exists and can log in (`root` is the auto-login user in the

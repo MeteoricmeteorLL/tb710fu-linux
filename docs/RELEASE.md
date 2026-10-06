@@ -1,30 +1,34 @@
 # Publishing this / 发布说明
 
-Everything here was produced on the device and verified on it; the one thing that
-matters for a stranger downloading it is that the rootfs tarball is intact, and
-that is what most of the checking below is about.
+Everything here was produced on the device and checked on it.  For someone
+downloading it, the thing that matters most is that the 2 GB rootfs tarball is
+intact — which is why most of the checking below is about that one file, and why
+`scripts/verify-rootfs.sh` exists.
 
-这里的产物都是在设备上生成并在设备上验证过的。对下载者最重要的一点是 rootfs
-包必须完好无损，下面大部分校验都是为它服务的。
+这里的产物都是在设备上生成、并在设备上校验过的。对下载者而言最重要的是一点：那个
+2GB 的 rootfs 包必须完好 —— 所以下面大部分校验都围绕它，`scripts/verify-rootfs.sh`
+也正是为此而写。
 
 ## 1. What goes where / 什么放哪里
 
-**In the repository** (all small enough for git):
+**In the repository** — everything is under GitHub's 100 MB per-file limit, so a
+plain `git push` works; the 78 MB U-Boot source tarball is the only one that
+triggers the 50 MB warning:
 
-`README.md`, `docs/`, `scripts/`, `tools/`, `kernel/` (patches, sources, config,
-`Image.gz` 15 MB, DTB), `uboot/` (patches, `config`, both `boot_b` images,
-`u-boot-13r-src-*.tar.gz` 78 MB), `board/` (`stage-overrides/`, `board-root.tgz`
-42 MB), `firmware/` (`tb710fu-firmware-*.tar.gz` 37 MB + `MD5SUMS` + `README.md`),
-`release/` (checksums + manifest only).
+`README.md`, `docs/` (9 documents), `scripts/`, `tools/`, `kernel/` (patches,
+sources, `config`, `Image.gz` 15 MB, DTB), `uboot/` (patches, `config`, both
+`boot_b` images, `u-boot-13r-src-*.tar.gz` 78 MB), `board/` (`stage-overrides/`,
+`board-root.tgz` 42 MB), `firmware/` (`tb710fu-firmware-*.tar.gz` 37 MB +
+`MD5SUMS` + `README.md`), `release/` (checksums and the manifest only).
 
-**As a GitHub release asset** (2 GiB per-file limit — the tarball is 1.90 GiB, so
-it fits, but it does not belong in git):
+**As a GitHub release asset** — the tarball is 2.0 GB (1.90 GiB), under the 2 GiB
+per-asset limit, but it does not belong in git:
 
 | asset | size | sha256 |
 |---|---|---|
 | `tb710fu-rootfs-20261006.tar.zst` | 2 043 329 593 | `a1325d30e5b3f70c070895efc7f543d3656bbd5b594894c06f36c0612355d442` |
 
-If a host rejects the size, split it and document it:
+If a host rejects the size, split it and document that:
 
 ```sh
 split -b 1000M tb710fu-rootfs-20261006.tar.zst tb710fu-rootfs-20261006.tar.zst.part-
@@ -45,8 +49,8 @@ cat tb710fu-rootfs-20261006.tar.zst.part-* | sha256sum    # must match the line 
 | `kernel/dtb/dtb-before-fix.bin` | 163 840 | `14e1ac68d780f37d` |
 | `kernel/patches/TB710FU-full-tree.diff` | 178 824 | `2f369ff2807f37dd` |
 | `board/board-root.tgz` | 41 824 487 | `0d366cbf6b0abb87` |
-| `firmware/tb710fu-firmware-20261005.tar.gz` | 36 899 265 | `b01f91de0544` |
-| `firmware/MD5SUMS` | 2 306 | `ac5c0dbc9798` |
+| `firmware/tb710fu-firmware-20261005.tar.gz` | 36 899 265 | `b01f91de0544dac9` |
+| `firmware/MD5SUMS` | 2 306 | `ac5c0dbc97981568` |
 | `uboot/u-boot-13r-src-20261006-fbreg.tar.gz` | 78 245 248 | `5ca72394b4b0efa3` |
 | `tb710fu-rootfs-20261006.tar.zst` | 2 043 329 593 | `a1325d30e5b3f70c` |
 
@@ -69,7 +73,7 @@ with these left out:
 | `/root/.bash_history`, `.*history`, KDE state (`baloo`, `kwalletd`, `klipper`, `konsole`, `kactivitymanagerd`), `.local/share/Trash`, recently-used | what the user did |
 | `/var/log`, `/root/*.log`, `/var/lib/NetworkManager`, `system-connections` | logs and leases carry the network name |
 | `/etc/machine-id`, `/var/lib/dbus/machine-id`, `/var/lib/systemd/random-seed` | identify the machine the image came from |
-| `/root/Desktop|Documents|Downloads|Files|Pictures`, `/var/lib/apt/lists`, `/var/cache`, `/usr/share/doc|man`, `/snap` | personal files and bulk that does not belong in an image |
+| `/root/{Desktop,Documents,Downloads,Files,Pictures}`, `/var/lib/apt/lists`, `/var/cache`, `/usr/share/{doc,man}`, `/snap` | personal files and bulk that does not belong in an image |
 
 `tb-firstboot.service` regenerates machine-id, ssh host keys and hostname on the
 first boot of a deployment (`board/stage-overrides/`).
@@ -127,8 +131,8 @@ and U-Boot changes under their upstream licences (GPL-2.0).
 
 As of 2026-10-06 this is live at:
 
-* **repository** — <https://github.com/MeteoricmeteorLL/tb710fu-linux> (this tree,
-  158 files, includes the firmware)
+* **repository** — <https://github.com/MeteoricmeteorLL/tb710fu-linux>: the whole
+  tree (documents, kernel, U-Boot, board files, firmware)
 * **release** — <https://github.com/MeteoricmeteorLL/tb710fu-linux/releases/tag/rootfs-20261006>
   with `tb710fu-rootfs-20261006.tar.zst` (sha256 `a1325d30…`), `CHECKSUMS.txt` and
   the 75 175-file manifest
@@ -154,17 +158,15 @@ every script and `.dts` into CRLF on checkout.
 
 Notes / 注意:
 
-* GitHub refuses files over 100 MB inside a git repository, and warns above
-  50 MB.  Everything in this tree is under 100 MB, so `git add .` works:
-  `board/board-root.tgz` 42 MB, `firmware/tb710fu-firmware-*.tar.gz` 37 MB,
-  `uboot/u-boot-13r-src-*.tar.gz` 78 MB (that one will draw the 50 MB warning —
-  the release page or git-lfs is tidier for it).  Only the 2 GB rootfs tarball
-  **must** go on the release page.
-* The tarball copy used for the release is
+* Only the 2 GB rootfs tarball **must** go on the release page; the other big
+  files in the tree (42 MB, 37 MB, 78 MB) can be committed, and git-lfs is tidier
+  for the 78 MB one if you would rather not carry it in every clone.
+* The copy of the tarball used for the release is
   `release-incoming/tb710fu-rootfs-20261006.tar.zst` in the project workspace
-  (its sha256 was verified against the device's own record after transfer).
-* Keep `release/CHECKSUMS.txt` and the manifest **next to** the tarball on the
-  release page — that is what lets a downloader check it.
+  (its sha256 was checked against the device's own record after the transfer).
+* Keep `CHECKSUMS.txt` and the manifest **next to** the tarball on the release
+  page — that is what lets a downloader check it, and `scripts/verify-rootfs.sh`
+  reads exactly those two files.
 
 ## 6. What is verified, and what is not / 已验证与未验证
 
