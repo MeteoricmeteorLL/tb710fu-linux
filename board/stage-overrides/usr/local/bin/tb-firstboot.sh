@@ -53,6 +53,23 @@ EOF
     chmod 600 /etc/tb-wifi-credentials.conf
 fi
 
+# --- filesystem ownership (heals images packed on or before 2026-10-06) ---
+# Those images came from a tree that had been staged on Windows, so "/" and ~70
+# paths below it were owned by uid/gid 197609 rather than root.  systemd refuses
+# to canonicalize any path under a non-root-owned parent ("unsafe path
+# transition"), so systemd-tmpfiles silently created nothing: /tmp/.X11-unix was
+# missing, Xwayland could not create its sockets, and every X11 program --
+# glxgears included -- failed with "couldn't open display".  Put ownership
+# right, then let tmpfiles rebuild the runtime directories it owns.
+chown 0:0 / 2>/dev/null || true
+bad=$(find / -xdev \( -uid 197609 -o -gid 197609 \) -print 2>/dev/null | wc -l)
+if [ "$bad" -gt 0 ]; then
+    find / -xdev \( -uid 197609 -o -gid 197609 \) -exec chown 0:0 {} + 2>/dev/null || true
+    echo "tb-firstboot: ownership fixed on $bad paths (uid 197609 -> root)"
+fi
+mkdir -p -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
+systemd-tmpfiles --create 2>/dev/null || true
+
 mkdir -p /var/lib
 touch "$MARK"
 systemctl disable tb-firstboot.service 2>/dev/null || true
