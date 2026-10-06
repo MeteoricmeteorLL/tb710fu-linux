@@ -1,0 +1,21 @@
+# TB710FU: keep text LF (these trees are built and read on Linux), never let git
+# rewrite the blobs.  The repo is prepared on Windows, where the default
+# core.autocrlf=true would otherwise turn every shell script and .dts into CRLF
+# on checkout and show the whole tree as modified.
+
+* text=auto eol=lf
+
+# binaries: no diff, no conversion
+*.img binary
+*.bin binary
+*.mbn binary
+*.tlv binary
+*.fw binary
+*.ko binary
+*.dtb binary
+*.gz binary
+*.tgz binary
+*.zst binary
+*.xz binary
+*.png binary
+*.jpg binary

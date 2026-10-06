@@ -23,6 +23,12 @@ partitions next to it.
 > 无声，还有一个严重的内存损坏问题 —— 根因已找到，修复也在这个仓库里。每条都附了
 > 得出结论的实测依据。
 
+**Published / 已发布**: this repository ·
+[rootfs release `rootfs-20261006`](https://github.com/MeteoricmeteorLL/tb710fu-linux/releases/tag/rootfs-20261006)
+(the 2 GB tarball, sha256 `a1325d30…`) ·
+U-Boot changes in [Uboot-For-TB710FU](https://github.com/MeteoricmeteorLL/Uboot-For-TB710FU)
+commit `2c9e8827`, release [`fbreg-20261006`](https://github.com/MeteoricmeteorLL/Uboot-For-TB710FU/releases/tag/fbreg-20261006).
+
 ---
 
 ## What works / 可用状态

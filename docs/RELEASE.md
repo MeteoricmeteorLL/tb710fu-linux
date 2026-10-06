@@ -123,28 +123,34 @@ obtain their own.
 Everything else is: scripts/tools **MIT**, documentation **CC BY-SA 4.0**, kernel
 and U-Boot changes under their upstream licences (GPL-2.0).
 
-## 5. Pushing it / 推送步骤
+## 5. Published / 已发布
 
-There is no `gh` CLI and no stored git credentials on this machine, so the repo is
-prepared here and pushed from where your credentials are:
+As of 2026-10-06 this is live at:
+
+* **repository** — <https://github.com/MeteoricmeteorLL/tb710fu-linux> (this tree,
+  158 files, includes the firmware)
+* **release** — <https://github.com/MeteoricmeteorLL/tb710fu-linux/releases/tag/rootfs-20261006>
+  with `tb710fu-rootfs-20261006.tar.zst` (sha256 `a1325d30…`), `CHECKSUMS.txt` and
+  the 75 175-file manifest
+* **U-Boot changes** — <https://github.com/MeteoricmeteorLL/Uboot-For-TB710FU> commit
+  `2c9e8827` ("fix the framebuffer reservation reg byte order"), and release
+  `fbreg-20261006` with the flashable `boot_b-linboot-v3-fbreg.img`
+
+Republishing elsewhere / 换地方重发:
 
 ```sh
-cd opensource/tb710fu-linux
+git init -b main && git add . && git commit -m "TB710FU mainline Linux port"
+git remote add origin git@github.com:<you>/<repo>.git && git push -u origin main
 
-# 1. a repository of its own (this directory is the tree; it is not a git repo yet)
-git init -b main
-git add .
-git commit -m "TB710FU mainline Linux: kernel patches, U-Boot, board files, docs"
-git remote add origin git@github.com:<you>/tb710fu-linux.git
-git push -u origin main
-
-# 2. the big asset goes on the releases page, not in git
-#    github.com/<you>/tb710fu-linux/releases/new
-#    - tag:    rootfs-20261006
-#    - title:  TB710FU rootfs 20261006 (Ubuntu 26.04, Plasma 6)
-#    - attach: tb710fu-rootfs-20261006.tar.zst, CHECKSUMS.txt,
-#              tb710fu-rootfs-20261006.manifest.md5
+# the 2 GB asset goes on the releases page, not in git:
+#   - tag:    rootfs-20261006
+#   - attach: tb710fu-rootfs-20261006.tar.zst, CHECKSUMS.txt,
+#             tb710fu-rootfs-20261006.manifest.md5
 ```
+
+`.gitattributes` pins `eol=lf` for text and marks the blobs binary: this tree is
+built on Linux, and a Windows-side `core.autocrlf=true` would otherwise turn
+every script and `.dts` into CRLF on checkout.
 
 Notes / 注意:
 
