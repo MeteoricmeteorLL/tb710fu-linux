@@ -18,11 +18,12 @@ what gets unpacked onto the `linsys` partition.
 > `docs/STATUS.md`（各部位可用性）
 
 **Starting from a stock tablet?**  Do `docs/INSTALL-FROM-ZERO.md` first: it covers
-unlocking the bootloader, getting a recovery shell, and backing up the stock
-partitions — which this document assumes you already have.
+getting a recovery shell and backing up the stock partitions — which this document
+assumes you already have.  (Either way the bootloader has to be unlocked.)
 
-**如果机器还是原厂状态**，请先走 `docs/INSTALL-FROM-ZERO.md`：那里讲解锁引导程序、
-拿到带 `dd` 的 shell、以及**先备份原厂分区**；这些本文默认你已经具备。
+**如果机器还是原厂状态**，请先走 `docs/INSTALL-FROM-ZERO.md`：那里讲怎么拿到带 `dd`
+的 shell、以及**先备份原厂分区**；这些本文默认你已经具备。（两种情况都要求引导程序
+已解锁。）
 
 Two different shells appear below, and they are not the same thing:
 

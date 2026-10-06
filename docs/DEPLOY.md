@@ -9,11 +9,13 @@ TB710FU 的 UFS（逻辑扇区 4096 字节，`/dev/sda`，共 61 390 843 个扇�
 
 **Scope / 定位**: this is the *reference* — partition numbers, the reason for each
 step, the way back to Android, and the failure table.  For a step-by-step
-walkthrough start with `docs/INSTALL-FROM-ZERO.md` (stock device) or
-`docs/INSTALL.md` (already unlocked; two install paths).
+walkthrough start with `docs/INSTALL-FROM-ZERO.md` (stock device, nothing
+partitioned yet) or `docs/INSTALL.md` (bootloader already unlocked; two install
+paths).
 
 本文是**参考文档**：分区数值、每一步的原因、回安卓的方法、故障排查表。要按步骤跟着做，
-请看 `docs/INSTALL-FROM-ZERO.md`（原厂机器）或 `docs/INSTALL.md`（已解锁，两条安装路径）。
+请看 `docs/INSTALL-FROM-ZERO.md`（原厂机器、分区未动）或 `docs/INSTALL.md`（已解锁，
+两条安装路径）。
 
 Read `docs/KNOWN-ISSUES.md` first — in particular the memory-corruption item, and
 make sure the DTB you install carries the three `reserved-memory` nodes.

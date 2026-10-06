@@ -96,7 +96,7 @@ pixel values appearing in our own pages while we watched — is written up in
 
 ```
 docs/                       (9 documents / 共 9 篇)
-  INSTALL-FROM-ZERO.md  stock tablet → Linux: unlock, recovery shell, backups
+  INSTALL-FROM-ZERO.md  stock tablet → Linux: a recovery shell, then back up
   INSTALL.md         install this rootfs, or another distro / 安装教程（两条路径）
   STATUS.md          what works, part by part / 各部位支持情况
   DEPLOY.md          partitioning, boot chain, first boot, Android / 部署细节
@@ -131,9 +131,10 @@ LICENSE, .gitattributes
 
 ## Quick start / 快速开始
 
-* **Start from a stock tablet** — `docs/INSTALL-FROM-ZERO.md`: unlock, get a
-  recovery shell, back up the stock partitions. / 从原厂机器开始看
-  `docs/INSTALL-FROM-ZERO.md`（解锁、拿 shell、先备份）。
+* **Start from a stock tablet** — `docs/INSTALL-FROM-ZERO.md`: get a recovery
+  shell, back up the stock partitions first (the bootloader must already be
+  unlocked). / 从原厂机器开始看 `docs/INSTALL-FROM-ZERO.md`（拿一个 recovery
+  shell、先备份原厂分区；前提是引导程序已解锁）。
 * **Install it** — `docs/INSTALL.md`: partitions → U-Boot → `linboot` → rootfs,
   for this image **and** for another distribution. / 安装看 `docs/INSTALL.md`
   （本镜像与其他发行版两条路径）。

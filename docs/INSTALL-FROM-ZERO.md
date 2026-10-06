@@ -1,70 +1,45 @@
-# From zero / 从零开始
+# From a stock tablet / 从原厂机器开始
 
-For a **stock TB710FU** — Android still installed, bootloader possibly still
-locked, nothing partitioned.  It ends where `docs/INSTALL.md` begins, so read the
-two together: this document gets you a shell and a backup, that one installs
-Linux.
+For a **stock TB710FU** — Android still installed, nothing partitioned, no
+recovery flashed.  It ends where `docs/INSTALL.md` begins, so read the two
+together: this document gets you a shell and a backup, that one installs Linux.
 
-面向**原厂状态的 TB710FU** —— 安卓还在、引导程序可能还没解锁、分区也没动过。本文
-结束的地方正是 `docs/INSTALL.md` 的起点：本文负责把你带到"有 shell、有备份"的状态，
-那边负责装系统。
+面向**原厂状态的 TB710FU** —— 安卓还在、分区没动过、也没刷 recovery。本文结束的地方
+正是 `docs/INSTALL.md` 的起点：本文负责把你带到"有 shell、有备份"的状态，那边负责
+装系统。
 
-> ⚠️ **Unlocking is a one-way door** (it trips the hardware fuse) and it wipes the
-> device.  After it, the platform is permanently marked as unlocked.
-> **解锁是单向的**（会烧断硬件保险丝）并会清空设备；解锁后设备永久带"已解锁"标记。
+**Prerequisite: the bootloader must already be unlocked.**  That is a one-way change
+(it trips the hardware fuse) and it wipes the device; how to do it is specific to
+the model, and it is outside this repository.
 
-## 0. The four things to do first / 先做这四件事
+**前提：引导程序必须已经解锁。** 解锁是单向的（会烧断硬件保险丝）且会清空设备；怎么
+解锁与机型相关，不在本仓库范围内。
 
-1. **Unlock the bootloader** (§1) — one-way, wipes the device.
-2. **Get a shell with `dd`** (§2) — a booted recovery, ideally without flashing one.
-3. **Back up the stock partitions** (§3) — the only chance to do it.
-4. Then follow **`docs/INSTALL.md`** §1–3 — partitioning, boot chain, rootfs.
+## 0. What is different here / 与 INSTALL.md 的差别
 
-In this project steps 1–3 had already been done when we started: the device was
-unlocked, a community TWRP was flashed to `recovery_a`, and the stock images had
-been pulled.  What follows for §1 and §2 is therefore the **general path for this
-SoC family, not a procedure we ran ourselves** — treat it as a starting point and
-check it against your model's own documentation.
+Nothing about the install changes; two things come first, because a stock device is
+the only state in which they are possible:
 
-本项目开始时第 1–3 步已经做完了（设备已解锁、社区 TWRP 刷在 `recovery_a`、原厂镜像
-也已导出）。所以下面第 1、2 步写的是**这类高通机型的通用路径，而不是我们亲手跑过的
-流程** —— 请把它当起点，并与你这个型号自己的文档对照。
+安装流程本身一样，只是有两件事必须先做 —— 只有在原厂状态下才有机会做：
 
-## 1. Unlock the bootloader / 解锁引导程序
+1. **Get a shell with `dd`** (§1) — preferably without flashing a recovery.
+2. **Back up the stock partitions** (§2) — the only chance you get.
 
-On Android: Settings → About tablet → tap *Build number* seven times, then
-Developer options → **OEM unlocking: on**.  Connect USB, then:
+Then install from **`docs/INSTALL.md`** §1–3.
 
-在安卓里：设置 → 关于平板 → 连点"版本号"七次，然后开发者选项 → 打开 **OEM unlocking**。
-连好 USB，然后：
+In this project those two steps had already been done before we started (a
+community TWRP on `recovery_a`, the stock images pulled), so §1 is written as the
+general route for this SoC family rather than a procedure we ran ourselves.
 
-```sh
-adb devices                 # accept the RSA prompt on the device
-adb reboot bootloader       # into fastboot
-fastboot devices            # serial should appear
-fastboot flashing unlock    # or: fastboot oem unlock
-# confirm on the device screen - this erases userdata
-fastboot reboot
-```
+本项目开始前这两步已经做完了（社区 TWRP 刷在 `recovery_a`、原厂镜像已导出），所以
+§1 写的是这类高通机型的通用做法，而不是我们亲手跑过的流程。
 
-* If `flashing unlock` is refused, the model needs Lenovo's own unlock route
-  (a vendor tool/app, sometimes tied to a Lenovo account).  That is outside this
-  repository; look it up for TB710FU.
-* Do not skip the Developer-options toggle: without it `flashing unlock` returns
-  `FAILED (remote: 'OEM unlocking disabled')`.
-* **Your data is gone after this.**  Take what you want off the tablet first.
+## 1. A shell with `dd` / 一个带 `dd` 的 shell
 
-* 如果 `flashing unlock` 被拒绝，说明该机型要走联想自己的解锁流程（厂商工具/应用，
-  有时需要联想账号）—— 那不在本仓库范围内，请按 TB710FU 的资料操作。
-* 别跳过开发者选项里的开关，否则会得到 `FAILED (remote: 'OEM unlocking disabled')`。
-* **解锁会清空数据**，先把手里的东西备份出去。
+Everything from `docs/INSTALL.md` §1 on runs from such a shell.  Two ways, in
+order of preference:
 
-## 2. A shell with `dd` / 一个带 `dd` 的 shell
-
-Everything from `docs/INSTALL.md` §1 on runs from such a shell.  Two ways to get
-one, in order of preference:
-
-后面（`docs/INSTALL.md` 第 1 步起）所有命令都在这样的 shell 里跑。按推荐顺序有两种：
+后面（`docs/INSTALL.md` 第 1 步起）所有命令都在这样的 shell 里跑。按推荐顺序两种：
 
 **(a) Boot a recovery image without flashing it / 临时启动一个 recovery 镜像**
 
@@ -72,7 +47,7 @@ one, in order of preference:
 fastboot boot twrp.img      # runs from RAM; nothing is written to flash
 ```
 
-If that works, you get adb + a terminal and the flash stays untouched —
+If that works you get adb and a terminal and flash stays untouched —
 `recovery_a` keeps whatever Lenovo put there.  If your bootloader refuses
 `fastboot boot` (some do), fall back to (b).
 
@@ -98,7 +73,7 @@ partition.  Keep a copy of what you overwrote if you can.
 > **本仓库不提供任何 recovery 镜像。** 社区有本机型的 TWRP 构建，请从发布者处按其
 > 条款获取。
 
-## 3. Back up the stock side / 先备份原厂侧
+## 2. Back up the stock side / 先备份原厂侧
 
 Do this before touching any partition.  From the recovery shell, dump the
 partitions you might want back, and pull them off the device:
@@ -124,9 +99,9 @@ adb pull /sdcard/stock ./stock-backup
   this port only writes `boot_b`, `linboot`, `linsys` and the `misc` marker.  So a
   stock Android can be kept bootable next to Linux.
 * If the numbers in `INSTALL.md` §1 are for the 256 GB variant and yours is a
-  different size, recompute: `linboot` = 1 GiB = 262 144 sectors starting where
-  the old partition table had room, and `userdata` gets **everything else** up to
-  the last usable sector (total sectors − 34, since the backup GPT holds 33).
+  different size, recompute: `linboot` = 1 GiB = 262 144 sectors, starting where
+  the old table left room, and `userdata` gets **everything else** up to the last
+  usable sector (total sectors − 34, since the backup GPT holds 33).
   `sgdisk --print /dev/sda` shows the usable range; do not guess.
 
 * `persist` 与 `modem`/`fsg` 这组带的是单机校准数据，是最容易让人后悔没备份的。
@@ -138,19 +113,19 @@ adb pull /sdcard/stock ./stock-backup
   拿**剩下的全部**（到最后一个可用扇区，即总扇区数 − 34，因为备份 GPT 占 33 个）。
   `sgdisk --print /dev/sda` 会显示可用范围，**不要猜**。
 
-## 4. Now install / 开始安装
+## 3. Now install / 开始安装
 
 * partitions, boot chain, rootfs → **`docs/INSTALL.md`** §1–3
 * first boot and what to expect → **`docs/INSTALL.md`** §3 (path A)
 * going back to Android → **`docs/INSTALL.md`** §4
 * if it does not boot → **`docs/INSTALL.md`** §5
 
-## 5. Two honest notes / 两句实话
+## 4. Two honest notes / 两句实话
 
-* **A locked bootloader cannot be restored.**  Unlocking is irreversible on this
-  platform; "put it back to stock" means "flash stock images onto an unlocked
+* **A locked bootloader cannot be restored.**  On this platform unlocking is
+  irreversible; "put it back to stock" means "flash stock images onto an unlocked
   device", which is fine, but the unlock marker stays.
-  **无法把引导程序重新锁回去** —— 解锁在这类平台上是不可逆的；"恢复原厂"只能理解为
+  **无法把引导程序重新锁回去** —— 这类平台上解锁不可逆；"恢复原厂"只能理解为
   "在已解锁设备上刷回原厂镜像"，解锁标记会一直保留。
 * **Read `docs/KNOWN-ISSUES.md` before you commit your only tablet to this.**  The
   port works, but the speaker sound is distorted, WiFi is slow (and can take the
