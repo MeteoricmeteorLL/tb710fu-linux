@@ -58,34 +58,116 @@ framebuffer 保留为什么重要。
 
 ## 1. Partitions / 分区
 
-The layout this port expects (all numbers in **4096-byte logical sectors**, which
-is what this UFS reports — check with `sgdisk --print /dev/sda` first):
+### The layout / 布局
 
-| # | name | first | last | size | contents |
+Three partitions matter, and only one of them has a size you have to think about.
+Every number below is in **4096-byte logical sectors**, because that is what this
+UFS reports — check with `sgdisk --print /dev/sda` before you touch anything.
+
+三个分区是关键，其中只有一个的大小需要你决定。下面所有数字都是 **4096 字节逻辑
+扇区**（这台 UFS 报的就是这个），动手前先用 `sgdisk --print /dev/sda` 核对。
+
+| # | name | what it is / 是什么 | size / 大小 |
+|---|---|---|---|
+| 14 | `linboot` | the raw boot slot U-Boot reads at fixed offsets: kernel@0 (16 MiB window), initramfs@16 MiB (8 MiB window), DTB@24 MiB (160 KiB window) / U-Boot 按固定偏移读取的裸引导槽 | **keep 1 GiB.** The three windows end at 24.2 MiB, so 64 MiB would do; 1 GiB is what we use and leaves room for a bigger DTB or a spare kernel / **保持 1GiB**（三个窗口到 24.2MiB 为止，64MiB 也够；我们用 1GiB，留余量） |
+| 15 | `linsys` | the Linux root filesystem, ext4 / Linux 根文件系统 | **your call.** The shipped image extracts to 5.1 GiB, so 16 GiB is comfortable and 128 GiB is what we used / **由你决定**（镜像解包后 5.1GiB，16GiB 就够舒服，我们用 128GiB） |
+| 16 | `userdata` | Android / 安卓 | **everything that is left** / **剩下的全部** |
+
+The only boundary you are choosing is `linsys` ↔ `userdata`: more Linux means less
+Android.  Decide once — moving that boundary later means deleting and recreating
+both partitions, which loses both sides.
+
+你要选的只有 `linsys` ↔ `userdata` 这一条界线：Linux 多一点、安卓就少一点。请一次
+定好 —— 以后再挪这条界线，做法是删掉并重建这两个分区，两边数据都会没。
+
+### Ready-made sizes for the 256 GB variant / 256GB 版本的几组现成数值
+
+On this device `linboot` starts at sector 5 105 064 (right after the stock
+partitions 1–13, which you keep) and is always 262 144 sectors (1 GiB).  Pick a
+`linsys` size from the first column; the rest follows.
+
+在本机上 `linboot` 从扇区 5 105 064 开始（紧接你要保留的原厂 1–13 号分区），固定
+262 144 扇区（1GiB）。按第一列挑一个 `linsys` 大小，其余随之确定。
+
+| `linsys` | first | last | `userdata` (Android) | first | last |
 |---|---|---|---|---|---|
-| 14 | `linboot` | 5 105 064 | 5 367 207 | 1 GiB | raw boot slot: kernel@0, initramfs@16 MiB, DTB@24 MiB |
-| 15 | `linsys` | 5 367 208 | 38 921 639 | 128 GiB | the Linux root filesystem (ext4) |
-| 16 | `userdata` | 38 921 640 | 61 390 842 | 85.7 GiB | Android (it reformats this itself) |
+| 32 GiB | 5 367 208 | 13 725 815 | 181.8 GiB | 13 725 816 | 61 390 842 |
+| 64 GiB | 5 367 208 | 22 144 423 | 149.7 GiB | 22 144 424 | 61 390 842 |
+| **128 GiB** (what we use) | 5 367 208 | 38 921 639 | 85.7 GiB | 38 921 640 | 61 390 842 |
+| 192 GiB | 5 367 208 | 55 698 855 | 21.7 GiB | 55 698 856 | 61 390 842 |
+
+The table stops at sector 61 390 842, six sectors short of the end of the device
+(61 390 848 sectors): the backup GPT lives in the last few, so leave them alone.
+If the `UD_LAST` you read from your own device is a few sectors higher, using it
+is fine — the difference is under 32 KiB.
+
+表里停在扇区 61 390 842，比本机总扇区数 61 390 848 少 6 个：备份 GPT 占最后几个扇区，
+别去动它。若你从自己设备读到的 `UD_LAST` 比这大几个扇区，直接用也没问题 —— 差值不到
+32KiB。
+
+### Compute your own / 自己算
+
+```sh
+# in the recovery shell -- only LINSYS_GIB is yours to pick
+LINSYS_GIB=128
+LB_FIRST=5105064                       # one sector after the last partition you keep
+LB_SECT=262144                         # 1 GiB
+LS_FIRST=$((LB_FIRST + LB_SECT))
+LS_LAST=$((LS_FIRST + LINSYS_GIB * 262144 - 1))
+UD_FIRST=$((LS_LAST + 1))
+UD_LAST=$(sgdisk --print /dev/sda | sed -n 's/.*last usable sector is \([0-9]*\).*/\1/p')
+printf 'linboot  %s..%s\nlinsys   %s..%s\nuserdata %s..%s\n' \
+       "$LB_FIRST" "$((LS_FIRST - 1))" "$LS_FIRST" "$LS_LAST" "$UD_FIRST" "$UD_LAST"
+```
+
+* `UD_LAST` is read from the device, so this works on a different capacity too.
+* If partitions 1–13 are laid out differently, take `LB_FIRST` from
+  `sgdisk --print` as "one sector after the last partition you keep".
+* The three numbers you computed are what go into the `--new=` arguments below.
+
+* `UD_LAST` 是从设备读的，所以换容量也适用。
+* 如果 1–13 号分区布局不同，`LB_FIRST` 就从 `sgdisk --print` 里取"你要保留的最后一个
+  分区的下一个扇区"。
+* 算出来的三组数字，就是下面 `--new=` 要填的东西。
+
+### The commands / 命令
 
 ```sh
 # in the recovery shell
-sgdisk --print /dev/sda                      # note the current userdata TYPE GUID
-sgdisk --backup=/tmp/gpt-before.bin /dev/sda # keep this file
+sgdisk --print /dev/sda                       # note the current userdata TYPE GUID
+sgdisk --backup=/tmp/gpt-before.bin /dev/sda  # keep this file
 
-sgdisk --delete=14 --delete=15 /dev/sda      # <- this erases them
+sgdisk --delete=14 --delete=15 /dev/sda       # <- this erases them
 sgdisk --new=14:5105064:5367207   --change-name=14:linboot  --typecode=14:8300 /dev/sda
 sgdisk --new=15:5367208:38921639  --change-name=15:linsys   --typecode=15:8300 /dev/sda
-sgdisk --new=16:38921640:61390842 --change-name=16:userdata --typecode=16:<original userdata GUID> /dev/sda
+sgdisk --new=16:38921640:61390842 --change-name=16:userdata --typecode=16:1B81E7E6-F50D-419B-A739-2AEEF8DA3335 /dev/sda
 sgdisk --verify /dev/sda
 
 # the kernel's view of the table: per partition, never a blanket `partx -u`
 partx -d --nr 14 /dev/sda; partx -a --nr 14 /dev/sda; partx -a --nr 16 /dev/sda
+grep -E 'sda1[4-6]' /proc/partitions          # sizes must match your table above
 ```
 
-* This device's `sgdisk` accepts **long options only**.
-* Keep Android's original **type GUID** for `userdata` or Android will refuse to
-  format it.
+The numbers shown are the 128 GiB row — substitute whatever you computed.
+
+上面的数字是 128GiB 那一组 —— 换成你自己算出来的。
+
+* This device's `sgdisk` accepts **long options only** (`--new=`, not `-n`).
+* `userdata` must keep Android's own **type GUID**.  On this device it is
+  `1B81E7E6-F50D-419B-A739-2AEEF8DA3335`; take yours from the `--print` above.
+  Android refuses to format the partition with a different type.
+* `linboot` and `linsys` are plain Linux filesystem (`8300`).
+* If a number does not come out as planned, stop and roll back:
+  `sgdisk --load-backup=/tmp/gpt-before.bin /dev/sda`.
 * Details, warnings and the rollback path: `docs/DEPLOY.md` §2.
+
+* 这台设备上的 `sgdisk` **只认长选项**（`--new=`，不是 `-n`）。
+* `userdata` 必须沿用安卓自己的**类型 GUID**；本机是
+  `1B81E7E6-F50D-419B-A739-2AEEF8DA3335`，你的从上面那条 `--print` 里取。
+  类型不对安卓会拒绝格式化该分区。
+* `linboot` 与 `linsys` 用普通 Linux 文件系统类型（`8300`）。
+* 任何数值和计划不符 → 停手回滚：`sgdisk --load-backup=/tmp/gpt-before.bin /dev/sda`。
+* 细节、告警与回滚路径见 `docs/DEPLOY.md` 第 2 节。
 
 ## 2. Boot chain / 引导链
 

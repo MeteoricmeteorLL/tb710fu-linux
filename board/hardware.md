@@ -21,7 +21,7 @@ WiFi 供电轨。面板/触摸的点亮工作与这台机器的固件集来自
 | SoC | Qualcomm **SM8650Q** ("pineapple"), chip id `0x43051401` — the kernel calls it `C520v2` |
 | GPU | Adreno 750, `gen70900` (a7xx gen3) |
 | RAM | 8 GB, 7 010 MB usable |
-| storage | 256 GB UFS, `/dev/sda`, **4096-byte logical sectors**, 61 390 843 sectors |
+| storage | 256 GB UFS, `/dev/sda`, **4096-byte logical sectors**, 61 390 848 sectors (234.2 GiB) |
 
 ## Display / 显示
 

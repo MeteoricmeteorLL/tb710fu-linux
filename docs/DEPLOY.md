@@ -2,10 +2,10 @@
 
 From a recovery shell to a booting Plasma desktop.  Every command here was run on
 the device; the numbers are for a 256 GB TB710FU with a 4096-byte-logical-sector
-UFS (`/dev/sda`, 61 390 843 sectors).
+UFS (`/dev/sda`, 61 390 848 sectors of 4096 bytes = 234.2 GiB).
 
 从 recovery shell 到能起 Plasma 桌面。下面每条命令都是在实机上跑过的；数值对应 256GB
-TB710FU 的 UFS（逻辑扇区 4096 字节，`/dev/sda`，共 61 390 843 个扇区）。
+TB710FU 的 UFS（逻辑扇区 4096 字节，`/dev/sda`，共 61 390 848 个扇区 = 234.2GiB）。
 
 **Scope / 定位**: this is the *reference* — partition numbers, the reason for each
 step, the way back to Android, and the failure table.  For a step-by-step

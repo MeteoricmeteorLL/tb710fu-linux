@@ -98,20 +98,18 @@ adb pull /sdcard/stock ./stock-backup
 * The Linux side never touches `boot_a`, `vendor_boot_a`, `dtbo_a` or `vbmeta*`:
   this port only writes `boot_b`, `linboot`, `linsys` and the `misc` marker.  So a
   stock Android can be kept bootable next to Linux.
-* If the numbers in `INSTALL.md` §1 are for the 256 GB variant and yours is a
-  different size, recompute: `linboot` = 1 GiB = 262 144 sectors, starting where
-  the old table left room, and `userdata` gets **everything else** up to the last
-  usable sector (total sectors − 34, since the backup GPT holds 33).
-  `sgdisk --print /dev/sda` shows the usable range; do not guess.
+* Nothing needs computing by hand: `docs/INSTALL.md` §1 has ready-made rows for
+  the 256 GB variant and a snippet that derives the same numbers for any capacity,
+  reading the last usable sector from your own device.  Use it rather than
+  guessing — the partition geometry is the one thing here you cannot undo.
 
 * `persist` 与 `modem`/`fsg` 这组带的是单机校准数据，是最容易让人后悔没备份的。
 * `sgdisk --backup` 让你可以用一条命令回到原厂分区表。
 * Linux 侧**从不**碰 `boot_a`、`vendor_boot_a`、`dtbo_a`、`vbmeta*`，只写 `boot_b`、
   `linboot`、`linsys` 和 `misc` 标记 —— 所以原厂安卓可以继续与 Linux 并存启动。
-* 如果 `INSTALL.md` 第 1 步里的数值是 256GB 版本的，而你的机器容量不同，请重算：
-  `linboot` 取 1GiB（262 144 扇区）、起始位置接在原分区表有空间的地方，`userdata`
-  拿**剩下的全部**（到最后一个可用扇区，即总扇区数 − 34，因为备份 GPT 占 33 个）。
-  `sgdisk --print /dev/sda` 会显示可用范围，**不要猜**。
+* 不需要手算：`docs/INSTALL.md` 第 1 节给了 256GB 版本的现成数值，也给了能按任意容量
+  推导同样数字的脚本（最后一个可用扇区直接从你自己的设备读）。请用它，别猜 ——
+  分区几何是这里唯一无法反悔的东西。
 
 ## 3. Now install / 开始安装
 
